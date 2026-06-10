@@ -96,4 +96,5 @@ On macOS, a restricted sandbox may hide Core Audio devices. On Linux, sandboxed
 processes may be unable to reach the user PipeWire/PulseAudio server. If
 `tachyaudio.list_devices()` returns an empty tuple or only generic ALSA devices
 in a sandboxed environment, verify from an unsandboxed terminal before debugging
-the backend.
+the backend. Headless Linux containers may return no devices while still being
+able to build and import the native extension.
