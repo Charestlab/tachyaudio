@@ -9,6 +9,14 @@ public APIs may still change while the backend design stabilizes.
 
 - Nothing yet.
 
+## [0.2.0a2] - 2026-06-10
+
+### Changed
+
+- Linux device enumeration now returns no devices instead of raising when
+  miniaudio cannot initialize or enumerate an audio backend in headless
+  containers.
+
 ## [0.2.0a1] - 2026-06-10
 
 ### Added
