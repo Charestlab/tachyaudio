@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   macos:
     name: Build macOS wheels
@@ -27,4 +30,3 @@ jobs:
         with:
           name: macos-wheels
           path: wheelhouse/*.whl
-
