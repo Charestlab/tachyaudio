@@ -39,7 +39,7 @@ dev = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-tachyaudio = ["py.typed"]
+tachyaudio = ["py.typed", "vendor/*.h", "vendor/*.LICENSE", "vendor/*.md"]
 
 [tool.ruff]
 line-length = 100
