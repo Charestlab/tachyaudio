@@ -7,6 +7,32 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [0.2.0a1] - 2026-06-10
+
+### Added
+
+- Linux native backend using vendored `miniaudio`.
+- Linux device enumeration through miniaudio.
+- Linux native output playback with a ring-buffer-backed `OutputStream`.
+- Linux native input capture with nonblocking `InputStream.read()`.
+- Linux CI coverage for Python 3.10 through 3.14.
+- Vendored miniaudio license attribution.
+
+### Changed
+
+- Linux backend initialization prefers PulseAudio, then falls back to ALSA.
+
+### Known Limitations
+
+- Linux support is new and has only been validated on a small set of Ubuntu
+  audio configurations.
+- Windows backend support is not implemented yet.
+- The API is pre-alpha and may change before a stable release.
+
+## [0.1.0] - 2026-06-10
+
 ### Added
 
 - Initial Python package scaffold.
@@ -26,4 +52,3 @@ public APIs may still change while the backend design stabilizes.
 - Native backend support is currently macOS-only.
 - Windows and Linux backends are not implemented yet.
 - The API is pre-alpha and may change before the first PyPI release.
-
