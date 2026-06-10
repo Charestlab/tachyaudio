@@ -2200,8 +2200,7 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
     ma_context context;
     ma_result result = tachy_miniaudio_context_init(&context);
     if (result != MA_SUCCESS) {
-        PyErr_SetString(PyExc_RuntimeError, "miniaudio context initialization failed");
-        return NULL;
+        return PyList_New(0);
     }
 
     ma_device_info *playback_infos = NULL;
@@ -2216,8 +2215,7 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
         &capture_count);
     if (result != MA_SUCCESS) {
         ma_context_uninit(&context);
-        PyErr_SetString(PyExc_RuntimeError, "miniaudio device enumeration failed");
-        return NULL;
+        return PyList_New(0);
     }
 
     PyObject *devices = PyList_New(0);
