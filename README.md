@@ -3,12 +3,9 @@
 `tachyaudio` is a low-level audio package intended to replace tachypy’s direct
 dependency on `sounddevice`/PortAudio over time.
 
-Status: pre-alpha. The native backend is currently macOS-only and uses Core
-Audio directly. Windows and Linux backends are not implemented yet.
-
-The first production cross-platform backend may use vendored `miniaudio`, with
-tachypy consuming this package through its own higher-level `tachypy.audio`
-adapter.
+Status: pre-alpha. The native backend currently supports macOS through Core
+Audio and Linux through vendored `miniaudio`. Windows support is not implemented
+yet.
 
 ## Goals
 
@@ -39,9 +36,8 @@ with stream:
 stats = ta.play(samples, sample_rate=48_000, channels=2)
 ```
 
-The native backend currently supports macOS device enumeration and basic
-float32 output playback through a native ring buffer. Capture is intentionally
-unavailable until implemented and raises `BackendUnavailable`.
+The native backend currently supports device enumeration, float32 output
+playback, and nonblocking float32 input capture on macOS and Linux.
 
 `OutputStream` is currently a continuous stream. Write audio before or during
 playback; if the stream runs out of queued frames it outputs silence and counts
@@ -96,6 +92,8 @@ PYTHONPATH=src python3 examples/capture_level.py
 `InputStream.read(frame_count)` is nonblocking and returns currently available
 frames up to `frame_count`.
 
-On macOS, a restricted sandbox may hide Core Audio devices. If
-`tachyaudio.list_devices()` returns an empty tuple in a sandboxed environment,
-verify from an unsandboxed terminal before debugging the backend.
+On macOS, a restricted sandbox may hide Core Audio devices. On Linux, sandboxed
+processes may be unable to reach the user PipeWire/PulseAudio server. If
+`tachyaudio.list_devices()` returns an empty tuple or only generic ALSA devices
+in a sandboxed environment, verify from an unsandboxed terminal before debugging
+the backend.
