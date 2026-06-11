@@ -7,7 +7,10 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
-- Nothing yet.
+### Changed
+
+- Refactored native ring-buffer and stream-stat helpers without changing public
+  behavior.
 
 ## [0.2.0a2] - 2026-06-10
 

@@ -11,6 +11,64 @@
 #define TACHY_DEFAULT_BUFFER_MS 10
 #define TACHY_RING_SECONDS 1
 
+static size_t tachy_min_size(size_t left, size_t right)
+{
+    return left < right ? left : right;
+}
+
+static void tachy_ring_copy_in_raw(
+    uint8_t *ring,
+    size_t ring_capacity,
+    size_t *ring_write,
+    size_t *ring_size,
+    const uint8_t *source,
+    size_t byte_count)
+{
+    size_t first = tachy_min_size(byte_count, ring_capacity - *ring_write);
+    memcpy(ring + *ring_write, source, first);
+    memcpy(ring, source + first, byte_count - first);
+    *ring_write = (*ring_write + byte_count) % ring_capacity;
+    *ring_size += byte_count;
+}
+
+static size_t tachy_ring_copy_out_raw(
+    uint8_t *ring,
+    size_t ring_capacity,
+    size_t *ring_read,
+    size_t *ring_size,
+    uint8_t *target,
+    size_t byte_count)
+{
+    size_t copied = tachy_min_size(byte_count, *ring_size);
+    size_t first = tachy_min_size(copied, ring_capacity - *ring_read);
+
+    memcpy(target, ring + *ring_read, first);
+    memcpy(target + first, ring, copied - first);
+    *ring_read = (*ring_read + copied) % ring_capacity;
+    *ring_size -= copied;
+    return copied;
+}
+
+static PyObject *tachy_build_stream_stats(
+    unsigned long long frames_processed,
+    unsigned int underruns,
+    unsigned int overruns,
+    unsigned long long queued_frames,
+    double queued_latency,
+    unsigned int buffer_size)
+{
+    return Py_BuildValue(
+        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
+        "frames_processed", frames_processed,
+        "underruns", underruns,
+        "overruns", overruns,
+        "estimated_latency", queued_latency,
+        "queued_frames", queued_frames,
+        "queued_latency", queued_latency,
+        "buffer_size", buffer_size
+    );
+}
+
 #ifdef __linux__
 #define MA_NO_DECODING
 #define MA_NO_ENCODING
@@ -74,51 +132,48 @@ typedef struct {
 
 static PyTypeObject TachyInputStreamType;
 
-static size_t tachy_min_size(size_t left, size_t right)
-{
-    return left < right ? left : right;
-}
-
 static void tachy_ring_copy_in(TachyOutputStream *stream, const uint8_t *source, size_t byte_count)
 {
-    size_t first = tachy_min_size(byte_count, stream->ring_capacity - stream->ring_write);
-    memcpy(stream->ring + stream->ring_write, source, first);
-    memcpy(stream->ring, source + first, byte_count - first);
-    stream->ring_write = (stream->ring_write + byte_count) % stream->ring_capacity;
-    stream->ring_size += byte_count;
+    tachy_ring_copy_in_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_write,
+        &stream->ring_size,
+        source,
+        byte_count);
 }
 
 static void tachy_input_ring_copy_in(TachyInputStream *stream, const uint8_t *source, size_t byte_count)
 {
-    size_t first = tachy_min_size(byte_count, stream->ring_capacity - stream->ring_write);
-    memcpy(stream->ring + stream->ring_write, source, first);
-    memcpy(stream->ring, source + first, byte_count - first);
-    stream->ring_write = (stream->ring_write + byte_count) % stream->ring_capacity;
-    stream->ring_size += byte_count;
+    tachy_ring_copy_in_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_write,
+        &stream->ring_size,
+        source,
+        byte_count);
 }
 
 static size_t tachy_input_ring_copy_out(TachyInputStream *stream, uint8_t *target, size_t byte_count)
 {
-    size_t copied = tachy_min_size(byte_count, stream->ring_size);
-    size_t first = tachy_min_size(copied, stream->ring_capacity - stream->ring_read);
-
-    memcpy(target, stream->ring + stream->ring_read, first);
-    memcpy(target + first, stream->ring, copied - first);
-    stream->ring_read = (stream->ring_read + copied) % stream->ring_capacity;
-    stream->ring_size -= copied;
-    return copied;
+    return tachy_ring_copy_out_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_read,
+        &stream->ring_size,
+        target,
+        byte_count);
 }
 
 static size_t tachy_ring_copy_out(TachyOutputStream *stream, uint8_t *target, size_t byte_count)
 {
-    size_t copied = tachy_min_size(byte_count, stream->ring_size);
-    size_t first = tachy_min_size(copied, stream->ring_capacity - stream->ring_read);
-
-    memcpy(target, stream->ring + stream->ring_read, first);
-    memcpy(target + first, stream->ring, copied - first);
-    stream->ring_read = (stream->ring_read + copied) % stream->ring_capacity;
-    stream->ring_size -= copied;
-    return copied;
+    return tachy_ring_copy_out_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_read,
+        &stream->ring_size,
+        target,
+        byte_count);
 }
 
 static void tachy_fill_output_buffer(TachyOutputStream *stream, AudioQueueBufferRef buffer)
@@ -574,16 +629,13 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
     double queued_latency = estimated_latency;
     pthread_mutex_unlock(&self->lock);
 
-    return Py_BuildValue(
-        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
-        "frames_processed", frames_processed,
-        "underruns", underruns,
-        "overruns", overruns,
-        "estimated_latency", estimated_latency,
-        "queued_frames", queued_frames,
-        "queued_latency", queued_latency,
-        "buffer_size", buffer_size
-    );
+    return tachy_build_stream_stats(
+        frames_processed,
+        underruns,
+        overruns,
+        queued_frames,
+        queued_latency,
+        buffer_size);
 }
 
 static PyMethodDef tachy_output_methods[] = {
@@ -942,16 +994,13 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
     double queued_latency = estimated_latency;
     pthread_mutex_unlock(&self->lock);
 
-    return Py_BuildValue(
-        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
-        "frames_processed", frames_processed,
-        "underruns", underruns,
-        "overruns", overruns,
-        "estimated_latency", estimated_latency,
-        "queued_frames", queued_frames,
-        "queued_latency", queued_latency,
-        "buffer_size", buffer_size
-    );
+    return tachy_build_stream_stats(
+        frames_processed,
+        underruns,
+        overruns,
+        queued_frames,
+        queued_latency,
+        buffer_size);
 }
 
 static PyMethodDef tachy_input_methods[] = {
@@ -1238,30 +1287,26 @@ static ma_result tachy_miniaudio_context_init(ma_context *context)
     return ma_context_init(backends, sizeof(backends) / sizeof(backends[0]), NULL, context);
 }
 
-static size_t tachy_miniaudio_min_size(size_t left, size_t right)
-{
-    return left < right ? left : right;
-}
-
 static void tachy_miniaudio_ring_copy_in(TachyOutputStream *stream, const uint8_t *source, size_t byte_count)
 {
-    size_t first = tachy_miniaudio_min_size(byte_count, stream->ring_capacity - stream->ring_write);
-    memcpy(stream->ring + stream->ring_write, source, first);
-    memcpy(stream->ring, source + first, byte_count - first);
-    stream->ring_write = (stream->ring_write + byte_count) % stream->ring_capacity;
-    stream->ring_size += byte_count;
+    tachy_ring_copy_in_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_write,
+        &stream->ring_size,
+        source,
+        byte_count);
 }
 
 static size_t tachy_miniaudio_ring_copy_out(TachyOutputStream *stream, uint8_t *target, size_t byte_count)
 {
-    size_t copied = tachy_miniaudio_min_size(byte_count, stream->ring_size);
-    size_t first = tachy_miniaudio_min_size(copied, stream->ring_capacity - stream->ring_read);
-
-    memcpy(target, stream->ring + stream->ring_read, first);
-    memcpy(target + first, stream->ring, copied - first);
-    stream->ring_read = (stream->ring_read + copied) % stream->ring_capacity;
-    stream->ring_size -= copied;
-    return copied;
+    return tachy_ring_copy_out_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_read,
+        &stream->ring_size,
+        target,
+        byte_count);
 }
 
 static void tachy_miniaudio_output_callback(
@@ -1612,7 +1657,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
 
     pthread_mutex_lock(&self->lock);
     size_t available = self->ring_capacity - self->ring_size;
-    size_t accepted = tachy_miniaudio_min_size((size_t)view.len, available);
+    size_t accepted = tachy_min_size((size_t)view.len, available);
     accepted -= accepted % self->bytes_per_frame;
     if (accepted < (size_t)view.len) {
         self->overruns += 1;
@@ -1643,16 +1688,13 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
     ma_uint32 buffer_size = self->buffer_frames;
     pthread_mutex_unlock(&self->lock);
 
-    return Py_BuildValue(
-        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
-        "frames_processed", frames_processed,
-        "underruns", underruns,
-        "overruns", overruns,
-        "estimated_latency", estimated_latency,
-        "queued_frames", queued_frames,
-        "queued_latency", queued_latency,
-        "buffer_size", buffer_size
-    );
+    return tachy_build_stream_stats(
+        frames_processed,
+        underruns,
+        overruns,
+        queued_frames,
+        queued_latency,
+        buffer_size);
 }
 
 static PyMethodDef tachy_output_methods[] = {
@@ -1683,11 +1725,13 @@ static void tachy_miniaudio_input_ring_copy_in(
     const uint8_t *source,
     size_t byte_count)
 {
-    size_t first = tachy_miniaudio_min_size(byte_count, stream->ring_capacity - stream->ring_write);
-    memcpy(stream->ring + stream->ring_write, source, first);
-    memcpy(stream->ring, source + first, byte_count - first);
-    stream->ring_write = (stream->ring_write + byte_count) % stream->ring_capacity;
-    stream->ring_size += byte_count;
+    tachy_ring_copy_in_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_write,
+        &stream->ring_size,
+        source,
+        byte_count);
 }
 
 static size_t tachy_miniaudio_input_ring_copy_out(
@@ -1695,14 +1739,13 @@ static size_t tachy_miniaudio_input_ring_copy_out(
     uint8_t *target,
     size_t byte_count)
 {
-    size_t copied = tachy_miniaudio_min_size(byte_count, stream->ring_size);
-    size_t first = tachy_miniaudio_min_size(copied, stream->ring_capacity - stream->ring_read);
-
-    memcpy(target, stream->ring + stream->ring_read, first);
-    memcpy(target + first, stream->ring, copied - first);
-    stream->ring_read = (stream->ring_read + copied) % stream->ring_capacity;
-    stream->ring_size -= copied;
-    return copied;
+    return tachy_ring_copy_out_raw(
+        stream->ring,
+        stream->ring_capacity,
+        &stream->ring_read,
+        &stream->ring_size,
+        target,
+        byte_count);
 }
 
 static void tachy_miniaudio_input_callback(
@@ -1721,7 +1764,7 @@ static void tachy_miniaudio_input_callback(
 
     pthread_mutex_lock(&stream->lock);
     size_t available = stream->ring_capacity - stream->ring_size;
-    size_t accepted = tachy_miniaudio_min_size(byte_count, available);
+    size_t accepted = tachy_min_size(byte_count, available);
     accepted -= accepted % stream->bytes_per_frame;
     if (accepted < byte_count) {
         stream->overruns += 1;
@@ -1995,7 +2038,7 @@ static PyObject *tachy_input_read(TachyInputStream *self, PyObject *args)
     size_t requested = (size_t)frame_count * self->bytes_per_frame;
 
     pthread_mutex_lock(&self->lock);
-    size_t copied = tachy_miniaudio_min_size(requested, self->ring_size);
+    size_t copied = tachy_min_size(requested, self->ring_size);
     copied -= copied % self->bytes_per_frame;
     if (copied < requested) {
         self->underruns += 1;
@@ -2042,16 +2085,13 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
     ma_uint32 buffer_size = self->buffer_frames;
     pthread_mutex_unlock(&self->lock);
 
-    return Py_BuildValue(
-        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
-        "frames_processed", frames_processed,
-        "underruns", underruns,
-        "overruns", overruns,
-        "estimated_latency", estimated_latency,
-        "queued_frames", queued_frames,
-        "queued_latency", queued_latency,
-        "buffer_size", buffer_size
-    );
+    return tachy_build_stream_stats(
+        frames_processed,
+        underruns,
+        overruns,
+        queued_frames,
+        queued_latency,
+        buffer_size);
 }
 
 static PyMethodDef tachy_input_methods[] = {
