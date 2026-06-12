@@ -163,6 +163,8 @@ class EqualizerMeter:
         self.refresh = refresh
         self.last_update = 0.0
         self.started = time.monotonic()
+        self.drawn_lines = 0
+        self.dynamic = sys.stdout.isatty()
 
     def maybe_draw(self, samples: array, *, frame_cursor: int, total_frames: int) -> None:
         now = time.monotonic()
@@ -172,19 +174,39 @@ class EqualizerMeter:
         levels = self._band_levels(samples)
         position = frame_cursor / self.sample_rate
         duration = total_frames / self.sample_rate
-        bars = " ".join(
-            f"{name}:{self._bar(level)}"
-            for (name, _frequency), level in zip(_EQ_BANDS, levels, strict=True)
-        )
-        print(f"\r{position:6.1f}/{duration:6.1f}s {bars}", end="", flush=True)
+        if self.dynamic:
+            self._draw_dynamic(levels, position=position, duration=duration)
+        else:
+            self._draw_log_line(levels, position=position, duration=duration)
 
     def finish(self) -> None:
-        print()
+        if self.drawn_lines:
+            print()
 
     def _bar(self, level: float) -> str:
         scaled = min(1.0, math.sqrt(max(0.0, level)) * 2.5)
         filled = min(self.width, int(round(scaled * self.width)))
         return "█" * filled + "░" * (self.width - filled)
+
+    def _draw_dynamic(self, levels: list[float], *, position: float, duration: float) -> None:
+        lines = [f"EQ {position:6.1f}/{duration:6.1f}s"]
+        for (name, _frequency), level in zip(_EQ_BANDS, levels, strict=True):
+            lines.append(f"{name:7} {self._bar(level)}")
+
+        if self.drawn_lines:
+            sys.stdout.write(f"\033[{self.drawn_lines}F")
+        for line in lines:
+            sys.stdout.write(f"\033[2K{line}\n")
+        sys.stdout.flush()
+        self.drawn_lines = len(lines)
+
+    def _draw_log_line(self, levels: list[float], *, position: float, duration: float) -> None:
+        bars = " ".join(
+            f"{name}:{self._bar(level)}"
+            for (name, _frequency), level in zip(_EQ_BANDS, levels, strict=True)
+        )
+        print(f"\r{position:6.1f}/{duration:6.1f}s {bars}", end="", flush=True)
+        self.drawn_lines = 1
 
     def _band_levels(self, samples: array) -> list[float]:
         frame_count = len(samples) // self.channels
