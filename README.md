@@ -53,6 +53,9 @@ Use blocking helpers when callers need complete buffer transfer:
 - `InputStream.read_exactly(frame_count, timeout=None)`: wait until exactly the
   requested number of frames has been captured
 
+Full-duplex capture/playback is exposed as `DuplexStream`. The public API is in
+place, but native backend implementations are still under development.
+
 Lifecycle semantics:
 
 - `stop()`: stop playback without discarding queued frames
