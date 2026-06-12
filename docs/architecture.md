@@ -34,6 +34,11 @@ Input capture mirrors output buffering in reverse: Core Audio callbacks write
 captured float32 frames into a native ring buffer, and Python reads available
 frames without invoking Python from the audio callback.
 
+The core stream methods remain nonblocking: `write()` accepts as many frames as
+the output ring can hold, and `read()` returns currently available captured
+frames. Blocking helpers (`write_all()` and `read_exactly()`) are Python-level
+conveniences layered on top of those primitives.
+
 Stream statistics distinguish queue state from hardware behavior. `queued_frames`
 and `queued_latency` describe the native ring buffer. `hardware_latency`
 describes backend-reported device latency when available. `buffer_size`

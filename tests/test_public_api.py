@@ -145,15 +145,17 @@ class PublicApiTests(unittest.TestCase):
     def test_play_helper_returns_stats(self) -> None:
         class OutputHandle:
             def __init__(self) -> None:
+                self.events: list[str] = []
                 self.frames = 0
 
             def start(self) -> None:
-                pass
+                self.events.append("start")
 
             def stop(self) -> None:
                 pass
 
             def drain(self, timeout: float | None = None) -> bool:
+                self.events.append("drain")
                 return True
 
             def flush(self) -> None:
@@ -163,6 +165,7 @@ class PublicApiTests(unittest.TestCase):
                 pass
 
             def write(self, frames: object) -> int:
+                self.events.append("write")
                 self.frames = 4
                 return self.frames
 
@@ -184,9 +187,105 @@ class PublicApiTests(unittest.TestCase):
             def open_input_stream(self, config: object) -> object:
                 raise NotImplementedError
 
-        ta.set_backend(Backend())
-        stats = ta.play(b"frames", timeout=0.1)
+        backend = Backend()
+        ta.set_backend(backend)
+        stats = ta.play(b"\x00" * 16, channels=1, timeout=0.1)
         self.assertEqual(stats.frames_processed, 4)
+        self.assertEqual(backend.handle.events, ["start", "write", "drain"])
+
+    def test_output_stream_write_all_handles_partial_writes(self) -> None:
+        class OutputHandle:
+            def __init__(self) -> None:
+                self.frames = 0
+
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def drain(self, timeout: float | None = None) -> bool:
+                return True
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def write(self, frames: object) -> int:
+                del frames
+                self.frames += 1
+                return 1
+
+            def stats(self) -> ta.StreamStats:
+                return ta.StreamStats(frames_processed=self.frames)
+
+        class Backend:
+            name = "test"
+
+            def __init__(self) -> None:
+                self.handle = OutputHandle()
+
+            def list_devices(self) -> tuple[ta.DeviceInfo, ...]:
+                return ()
+
+            def open_output_stream(self, config: object) -> OutputHandle:
+                return self.handle
+
+            def open_input_stream(self, config: object) -> object:
+                raise NotImplementedError
+
+        ta.set_backend(Backend())
+        stream = ta.OutputStream(channels=1)
+        try:
+            self.assertEqual(stream.write_all(b"\x00" * 12, timeout=0.1), 3)
+            self.assertEqual(stream.stats().frames_processed, 3)
+        finally:
+            stream.close()
+
+    def test_output_stream_write_all_times_out(self) -> None:
+        class OutputHandle:
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def drain(self, timeout: float | None = None) -> bool:
+                return True
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def write(self, frames: object) -> int:
+                return 0
+
+            def stats(self) -> ta.StreamStats:
+                return ta.StreamStats()
+
+        class Backend:
+            name = "test"
+
+            def list_devices(self) -> tuple[ta.DeviceInfo, ...]:
+                return ()
+
+            def open_output_stream(self, config: object) -> OutputHandle:
+                return OutputHandle()
+
+            def open_input_stream(self, config: object) -> object:
+                raise NotImplementedError
+
+        ta.set_backend(Backend())
+        stream = ta.OutputStream(channels=1)
+        try:
+            with self.assertRaises(TimeoutError):
+                stream.write_all(b"\x00" * 4, timeout=0.001)
+        finally:
+            stream.close()
 
     def test_input_stream_lifecycle_delegates_to_backend(self) -> None:
         class InputHandle:
@@ -246,6 +345,93 @@ class PublicApiTests(unittest.TestCase):
 
         with self.assertRaises(ta.StreamClosed):
             stream.read(1)
+
+    def test_input_stream_read_exactly_combines_chunks(self) -> None:
+        class InputHandle:
+            def __init__(self) -> None:
+                self.chunks = [b"\x01" * 8, b"\x02" * 8]
+
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def flush(self) -> None:
+                pass
+
+            def read(self, frame_count: int) -> memoryview:
+                del frame_count
+                return memoryview(self.chunks.pop(0) if self.chunks else b"")
+
+            def stats(self) -> ta.StreamStats:
+                return ta.StreamStats()
+
+        class Backend:
+            name = "test"
+
+            def __init__(self) -> None:
+                self.handle = InputHandle()
+
+            def list_devices(self) -> tuple[ta.DeviceInfo, ...]:
+                return ()
+
+            def open_output_stream(self, config: object) -> object:
+                raise NotImplementedError
+
+            def open_input_stream(self, config: object) -> InputHandle:
+                return self.handle
+
+        ta.set_backend(Backend())
+        stream = ta.InputStream(channels=1)
+        try:
+            data = stream.read_exactly(4, timeout=0.1)
+            self.assertEqual(bytes(data), b"\x01" * 8 + b"\x02" * 8)
+        finally:
+            stream.close()
+
+    def test_input_stream_read_exactly_times_out(self) -> None:
+        class InputHandle:
+            def start(self) -> None:
+                pass
+
+            def stop(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def flush(self) -> None:
+                pass
+
+            def read(self, frame_count: int) -> memoryview:
+                return memoryview(b"")
+
+            def stats(self) -> ta.StreamStats:
+                return ta.StreamStats()
+
+        class Backend:
+            name = "test"
+
+            def list_devices(self) -> tuple[ta.DeviceInfo, ...]:
+                return ()
+
+            def open_output_stream(self, config: object) -> object:
+                raise NotImplementedError
+
+            def open_input_stream(self, config: object) -> InputHandle:
+                return InputHandle()
+
+        ta.set_backend(Backend())
+        stream = ta.InputStream(channels=1)
+        try:
+            with self.assertRaises(TimeoutError):
+                stream.read_exactly(1, timeout=0.001)
+        finally:
+            stream.close()
 
     def test_stream_stats_preserves_zero_latency(self) -> None:
         stats = ta.StreamStats(estimated_latency=0.0)
