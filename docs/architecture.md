@@ -35,9 +35,11 @@ captured float32 frames into a native ring buffer, and Python reads available
 frames without invoking Python from the audio callback.
 
 Stream statistics distinguish queue state from hardware behavior. `queued_frames`
-and `queued_latency` describe the native ring buffer. `buffer_size` describes
-the callback buffer size in frames. `estimated_latency` currently aliases queued
-latency; future backends should include hardware output latency when available.
+and `queued_latency` describe the native ring buffer. `hardware_latency`
+describes backend-reported device latency when available. `buffer_size`
+describes the callback buffer size in frames. `estimated_latency` reports
+`queued_latency + hardware_latency` when hardware latency is available, otherwise
+queued latency.
 
 ## Real-time constraints
 

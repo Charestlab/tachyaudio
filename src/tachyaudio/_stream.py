@@ -41,6 +41,7 @@ class StreamStats:
     underruns: int = 0
     overruns: int = 0
     estimated_latency: float | None = None
+    hardware_latency: float | None = None
     queued_frames: int = 0
     queued_latency: float = 0.0
     buffer_size: int | None = None
@@ -54,6 +55,8 @@ class StreamStats:
             raise ValueError("overruns cannot be negative")
         if self.estimated_latency is not None and self.estimated_latency < 0:
             raise ValueError("estimated_latency cannot be negative")
+        if self.hardware_latency is not None and self.hardware_latency < 0:
+            raise ValueError("hardware_latency cannot be negative")
         if self.queued_frames < 0:
             raise ValueError("queued_frames cannot be negative")
         if self.queued_latency < 0:

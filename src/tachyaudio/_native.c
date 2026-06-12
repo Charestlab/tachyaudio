@@ -55,14 +55,53 @@ static PyObject *tachy_build_stream_stats(
     unsigned int overruns,
     unsigned long long queued_frames,
     double queued_latency,
+    double hardware_latency,
+    int has_hardware_latency,
+    unsigned int buffer_size)
+{
+    double estimated_latency = queued_latency;
+    PyObject *hardware_latency_object = Py_None;
+    if (has_hardware_latency) {
+        estimated_latency += hardware_latency;
+        hardware_latency_object = PyFloat_FromDouble(hardware_latency);
+        if (hardware_latency_object == NULL) {
+            return NULL;
+        }
+    } else {
+        Py_INCREF(Py_None);
+    }
+
+    PyObject *stats = NULL;
+    stats = Py_BuildValue(
+        "{s:K,s:I,s:I,s:d,s:O,s:K,s:d,s:I}",
+        "frames_processed", frames_processed,
+        "underruns", underruns,
+        "overruns", overruns,
+        "estimated_latency", estimated_latency,
+        "hardware_latency", hardware_latency_object,
+        "queued_frames", queued_frames,
+        "queued_latency", queued_latency,
+        "buffer_size", buffer_size
+    );
+    Py_DECREF(hardware_latency_object);
+    return stats;
+}
+
+static PyObject *tachy_build_stream_stats_without_hardware_latency(
+    unsigned long long frames_processed,
+    unsigned int underruns,
+    unsigned int overruns,
+    unsigned long long queued_frames,
+    double queued_latency,
     unsigned int buffer_size)
 {
     return Py_BuildValue(
-        "{s:K,s:I,s:I,s:d,s:K,s:d,s:I}",
+        "{s:K,s:I,s:I,s:d,s:O,s:K,s:d,s:I}",
         "frames_processed", frames_processed,
         "underruns", underruns,
         "overruns", overruns,
         "estimated_latency", queued_latency,
+        "hardware_latency", Py_None,
         "queued_frames", queued_frames,
         "queued_latency", queued_latency,
         "buffer_size", buffer_size
@@ -95,6 +134,7 @@ typedef struct {
     UInt32 pending_buffers;
     UInt32 underruns;
     UInt32 overruns;
+    double hardware_latency;
     uint8_t *ring;
     size_t ring_capacity;
     size_t ring_read;
@@ -119,6 +159,7 @@ typedef struct {
     UInt64 frames_processed;
     UInt32 underruns;
     UInt32 overruns;
+    double hardware_latency;
     uint8_t *ring;
     size_t ring_capacity;
     size_t ring_read;
@@ -131,6 +172,13 @@ typedef struct {
 } TachyInputStream;
 
 static PyTypeObject TachyInputStreamType;
+
+static AudioObjectID tachy_get_default_device(AudioObjectPropertySelector selector);
+static AudioObjectID tachy_find_device_by_uid(const char *device_uid);
+static double tachy_get_coreaudio_hardware_latency(
+    AudioObjectID device_id,
+    AudioObjectPropertyScope scope,
+    double sample_rate);
 
 static void tachy_ring_copy_in(TachyOutputStream *stream, const uint8_t *source, size_t byte_count)
 {
@@ -332,6 +380,7 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
     self->pending_buffers = 0;
     self->underruns = 0;
     self->overruns = 0;
+    self->hardware_latency = 0.0;
     self->ring = NULL;
     self->ring_capacity = (size_t)sample_rate * TACHY_RING_SECONDS * self->bytes_per_frame;
     if (self->ring_capacity < (size_t)self->buffer_byte_size * TACHY_OUTPUT_BUFFER_COUNT * 2) {
@@ -394,6 +443,14 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
         Py_DECREF(self);
         return NULL;
     }
+
+    AudioObjectID output_device = device_id == NULL || device_id[0] == '\0'
+        ? tachy_get_default_device(kAudioHardwarePropertyDefaultOutputDevice)
+        : tachy_find_device_by_uid(device_id);
+    self->hardware_latency = tachy_get_coreaudio_hardware_latency(
+        output_device,
+        kAudioDevicePropertyScopeOutput,
+        (double)sample_rate);
 
     for (UInt32 index = 0; index < TACHY_OUTPUT_BUFFER_COUNT; index++) {
         status = AudioQueueAllocateBuffer(self->queue, self->buffer_byte_size, &self->buffers[index]);
@@ -635,6 +692,8 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
         overruns,
         queued_frames,
         queued_latency,
+        self->hardware_latency,
+        1,
         buffer_size);
 }
 
@@ -757,6 +816,7 @@ static PyObject *tachy_input_new(PyTypeObject *type, PyObject *args, PyObject *k
     self->frames_processed = 0;
     self->underruns = 0;
     self->overruns = 0;
+    self->hardware_latency = 0.0;
     self->ring = NULL;
     self->ring_capacity = (size_t)sample_rate * TACHY_RING_SECONDS * self->bytes_per_frame;
     if (self->ring_capacity < (size_t)self->buffer_byte_size * TACHY_INPUT_BUFFER_COUNT * 2) {
@@ -818,6 +878,14 @@ static PyObject *tachy_input_new(PyTypeObject *type, PyObject *args, PyObject *k
         Py_DECREF(self);
         return NULL;
     }
+
+    AudioObjectID input_device = device_id == NULL || device_id[0] == '\0'
+        ? tachy_get_default_device(kAudioHardwarePropertyDefaultInputDevice)
+        : tachy_find_device_by_uid(device_id);
+    self->hardware_latency = tachy_get_coreaudio_hardware_latency(
+        input_device,
+        kAudioDevicePropertyScopeInput,
+        (double)sample_rate);
 
     for (UInt32 index = 0; index < TACHY_INPUT_BUFFER_COUNT; index++) {
         status = AudioQueueAllocateBuffer(self->queue, self->buffer_byte_size, &self->buffers[index]);
@@ -1000,6 +1068,8 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
         overruns,
         queued_frames,
         queued_latency,
+        self->hardware_latency,
+        1,
         buffer_size);
 }
 
@@ -1113,6 +1183,96 @@ static AudioObjectID tachy_get_default_device(AudioObjectPropertySelector select
     }
 
     return device_id;
+}
+
+static AudioObjectID tachy_find_device_by_uid(const char *device_uid)
+{
+    if (device_uid == NULL || device_uid[0] == '\0') {
+        return kAudioObjectUnknown;
+    }
+
+    AudioObjectPropertyAddress address = {
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 size = 0;
+    OSStatus status = AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, NULL, &size);
+
+    if (status != noErr || size == 0) {
+        return kAudioObjectUnknown;
+    }
+
+    AudioObjectID *device_ids = (AudioObjectID *)PyMem_RawMalloc(size);
+    if (device_ids == NULL) {
+        return kAudioObjectUnknown;
+    }
+
+    status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, &size, device_ids);
+    if (status != noErr) {
+        PyMem_RawFree(device_ids);
+        return kAudioObjectUnknown;
+    }
+
+    AudioObjectID found_device = kAudioObjectUnknown;
+    UInt32 device_count = size / sizeof(AudioObjectID);
+    for (UInt32 index = 0; index < device_count; index++) {
+        char uid[256] = {0};
+        if (tachy_get_cf_string(device_ids[index], kAudioDevicePropertyDeviceUID, uid, sizeof(uid)) &&
+                strcmp(uid, device_uid) == 0) {
+            found_device = device_ids[index];
+            break;
+        }
+    }
+
+    PyMem_RawFree(device_ids);
+    return found_device;
+}
+
+static UInt32 tachy_get_coreaudio_uint32_property(
+    AudioObjectID device_id,
+    AudioObjectPropertySelector selector,
+    AudioObjectPropertyScope scope)
+{
+    if (device_id == kAudioObjectUnknown) {
+        return 0;
+    }
+
+    AudioObjectPropertyAddress address = {
+        selector,
+        scope,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 value = 0;
+    UInt32 size = sizeof(value);
+    OSStatus status = AudioObjectGetPropertyData(device_id, &address, 0, NULL, &size, &value);
+
+    if (status != noErr) {
+        return 0;
+    }
+
+    return value;
+}
+
+static double tachy_get_coreaudio_hardware_latency(
+    AudioObjectID device_id,
+    AudioObjectPropertyScope scope,
+    double sample_rate)
+{
+    if (sample_rate <= 0.0) {
+        return 0.0;
+    }
+
+    UInt32 latency_frames = tachy_get_coreaudio_uint32_property(
+        device_id,
+        kAudioDevicePropertyLatency,
+        scope);
+    UInt32 safety_offset_frames = tachy_get_coreaudio_uint32_property(
+        device_id,
+        kAudioDevicePropertySafetyOffset,
+        scope);
+
+    return (double)(latency_frames + safety_offset_frames) / sample_rate;
 }
 
 static int tachy_append_device(PyObject *devices, AudioObjectID device_id, const char *kind, UInt32 channels, int is_default)
@@ -1688,7 +1848,7 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
     ma_uint32 buffer_size = self->buffer_frames;
     pthread_mutex_unlock(&self->lock);
 
-    return tachy_build_stream_stats(
+    return tachy_build_stream_stats_without_hardware_latency(
         frames_processed,
         underruns,
         overruns,
@@ -2085,7 +2245,7 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
     ma_uint32 buffer_size = self->buffer_frames;
     pthread_mutex_unlock(&self->lock);
 
-    return tachy_build_stream_stats(
+    return tachy_build_stream_stats_without_hardware_latency(
         frames_processed,
         underruns,
         overruns,
