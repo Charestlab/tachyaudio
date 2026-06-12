@@ -46,6 +46,13 @@ an underrun.
 Use `tachyaudio.play()` for finite stimuli that should start, drain, and close
 as a single operation.
 
+Use blocking helpers when callers need complete buffer transfer:
+
+- `OutputStream.write_all(frames, timeout=None)`: wait until all frames are
+  accepted by the output ring
+- `InputStream.read_exactly(frame_count, timeout=None)`: wait until exactly the
+  requested number of frames has been captured
+
 Lifecycle semantics:
 
 - `stop()`: stop playback without discarding queued frames
