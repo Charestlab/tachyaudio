@@ -7,12 +7,21 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+## [0.2.0b1] - 2026-06-12
+
 ### Added
 
 - Added the public `DuplexStream` API contract for backend-level full-duplex
   capture and playback.
 - Added native macOS `DuplexStream` support backed by Core Audio input and
   output queues owned by one native stream object.
+- Added native Linux `DuplexStream` support backed by one miniaudio duplex
+  device callback.
+
+### Changed
+
+- Promoted package metadata from pre-alpha to beta.
+- Kept wheel builds intentionally per-CPython-version rather than stable ABI.
 
 ## [0.2.0a3] - 2026-06-12
 
