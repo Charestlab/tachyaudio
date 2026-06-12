@@ -160,6 +160,6 @@ class NativeBackend:
         return NativeInputStream(config)
 
     def open_duplex_stream(self, config: object) -> NativeDuplexStream:
-        if self.name != "coreaudio":
+        if self.name not in {"coreaudio", "miniaudio"}:
             raise BackendUnavailable("native duplex streams are not implemented for this backend yet")
         return NativeDuplexStream(config)
