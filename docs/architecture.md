@@ -42,7 +42,8 @@ conveniences layered on top of those primitives.
 Full-duplex support is modeled as a backend-level `DuplexStream`, not as a
 Python wrapper around one `OutputStream` and one `InputStream`. Backends should
 use a single native duplex callback where available so capture and playback share
-one scheduling clock.
+one scheduling clock. The current macOS implementation owns both native Core
+Audio queues inside one native stream object; Linux duplex support remains next.
 
 Stream statistics distinguish queue state from hardware behavior. `queued_frames`
 and `queued_latency` describe the native ring buffer. `hardware_latency`

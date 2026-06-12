@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
-from typing import NoReturn
+from collections.abc import Mapping
+from typing import Any
 
 from tachyaudio import _native
 from tachyaudio._device import DeviceInfo, DeviceKind
 from tachyaudio._errors import BackendUnavailable
+
+
+def _stream_stats_from_native(item: Mapping[str, Any]) -> object:
+    from tachyaudio._stream import StreamStats
+
+    return StreamStats(
+        frames_processed=item["frames_processed"],
+        underruns=item["underruns"],
+        overruns=item["overruns"],
+        estimated_latency=item["estimated_latency"],
+        hardware_latency=item["hardware_latency"],
+        queued_frames=item["queued_frames"],
+        queued_latency=item["queued_latency"],
+        buffer_size=item["buffer_size"],
+    )
 
 
 class NativeOutputStream:
@@ -40,19 +56,7 @@ class NativeOutputStream:
         return self._handle.write(frames)
 
     def stats(self) -> object:
-        from tachyaudio._stream import StreamStats
-
-        item = self._handle.stats()
-        return StreamStats(
-            frames_processed=item["frames_processed"],
-            underruns=item["underruns"],
-            overruns=item["overruns"],
-            estimated_latency=item["estimated_latency"],
-            hardware_latency=item["hardware_latency"],
-            queued_frames=item["queued_frames"],
-            queued_latency=item["queued_latency"],
-            buffer_size=item["buffer_size"],
-        )
+        return _stream_stats_from_native(self._handle.stats())
 
 
 class NativeInputStream:
@@ -83,18 +87,48 @@ class NativeInputStream:
         return memoryview(self._handle.read(frame_count))
 
     def stats(self) -> object:
-        from tachyaudio._stream import StreamStats
+        return _stream_stats_from_native(self._handle.stats())
+
+
+class NativeDuplexStream:
+    """Python-facing wrapper around the native duplex stream handle."""
+
+    def __init__(self, config: object) -> None:
+        self._handle = _native.DuplexStream(
+            config.sample_rate,  # type: ignore[attr-defined]
+            config.input_channels,  # type: ignore[attr-defined]
+            config.output_channels,  # type: ignore[attr-defined]
+            config.block_size or 0,  # type: ignore[attr-defined]
+            config.input_device_id,  # type: ignore[attr-defined]
+            config.output_device_id,  # type: ignore[attr-defined]
+            config.latency or 0.0,  # type: ignore[attr-defined]
+        )
+
+    def start(self) -> None:
+        self._handle.start()
+
+    def stop(self) -> None:
+        self._handle.stop()
+
+    def flush(self) -> None:
+        self._handle.flush()
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def write(self, frames: object) -> int:
+        return self._handle.write(frames)
+
+    def read(self, frame_count: int) -> memoryview:
+        return memoryview(self._handle.read(frame_count))
+
+    def stats(self) -> object:
+        from tachyaudio._stream import DuplexStreamStats
 
         item = self._handle.stats()
-        return StreamStats(
-            frames_processed=item["frames_processed"],
-            underruns=item["underruns"],
-            overruns=item["overruns"],
-            estimated_latency=item["estimated_latency"],
-            hardware_latency=item["hardware_latency"],
-            queued_frames=item["queued_frames"],
-            queued_latency=item["queued_latency"],
-            buffer_size=item["buffer_size"],
+        return DuplexStreamStats(
+            input=_stream_stats_from_native(item["input"]),
+            output=_stream_stats_from_native(item["output"]),
         )
 
 
@@ -125,6 +159,7 @@ class NativeBackend:
     def open_input_stream(self, config: object) -> NativeInputStream:
         return NativeInputStream(config)
 
-    def open_duplex_stream(self, config: object) -> NoReturn:
-        del config
-        raise BackendUnavailable("native duplex streams are not implemented yet")
+    def open_duplex_stream(self, config: object) -> NativeDuplexStream:
+        if self.name != "coreaudio":
+            raise BackendUnavailable("native duplex streams are not implemented for this backend yet")
+        return NativeDuplexStream(config)

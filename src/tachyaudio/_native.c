@@ -1097,6 +1097,259 @@ static PyTypeObject TachyInputStreamType = {
     .tp_new = tachy_input_new,
 };
 
+typedef struct {
+    PyObject_HEAD
+    TachyInputStream *input;
+    TachyOutputStream *output;
+    int closed;
+} TachyDuplexStream;
+
+static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    static char *keywords[] = {
+        "sample_rate",
+        "input_channels",
+        "output_channels",
+        "block_size",
+        "input_device_id",
+        "output_device_id",
+        "latency",
+        NULL
+    };
+    int sample_rate = 0;
+    int input_channels = 0;
+    int output_channels = 0;
+    int block_size = 0;
+    const char *input_device_id = NULL;
+    const char *output_device_id = NULL;
+    double latency = 0.0;
+
+    if (!PyArg_ParseTupleAndKeywords(
+            args,
+            kwargs,
+            "iiiizzd",
+            keywords,
+            &sample_rate,
+            &input_channels,
+            &output_channels,
+            &block_size,
+            &input_device_id,
+            &output_device_id,
+            &latency)) {
+        return NULL;
+    }
+
+    if (sample_rate < 1 || input_channels < 1 || output_channels < 1) {
+        PyErr_SetString(PyExc_ValueError, "sample_rate and channel counts must be positive");
+        return NULL;
+    }
+
+    TachyDuplexStream *self = (TachyDuplexStream *)type->tp_alloc(type, 0);
+    if (self == NULL) {
+        return NULL;
+    }
+    self->input = NULL;
+    self->output = NULL;
+    self->closed = 0;
+
+    PyObject *input_args = Py_BuildValue(
+        "(iiizd)",
+        sample_rate,
+        input_channels,
+        block_size,
+        input_device_id,
+        latency);
+    if (input_args == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    self->input = (TachyInputStream *)PyObject_CallObject((PyObject *)&TachyInputStreamType, input_args);
+    Py_DECREF(input_args);
+    if (self->input == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
+
+    PyObject *output_args = Py_BuildValue(
+        "(iiizd)",
+        sample_rate,
+        output_channels,
+        block_size,
+        output_device_id,
+        latency);
+    if (output_args == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
+    self->output = (TachyOutputStream *)PyObject_CallObject((PyObject *)&TachyOutputStreamType, output_args);
+    Py_DECREF(output_args);
+    if (self->output == NULL) {
+        Py_DECREF(self);
+        return NULL;
+    }
+
+    return (PyObject *)self;
+}
+
+static void tachy_duplex_dealloc(TachyDuplexStream *self)
+{
+    if (!self->closed) {
+        self->closed = 1;
+        if (self->output != NULL) {
+            (void)tachy_output_close(self->output, NULL);
+        }
+        if (self->input != NULL) {
+            (void)tachy_input_close(self->input, NULL);
+        }
+    }
+    Py_CLEAR(self->output);
+    Py_CLEAR(self->input);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *tachy_duplex_start(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->closed || self->input == NULL || self->output == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+
+    PyObject *input_result = tachy_input_start(self->input, NULL);
+    if (input_result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(input_result);
+
+    PyObject *output_result = tachy_output_start(self->output, NULL);
+    if (output_result == NULL) {
+        (void)tachy_input_stop(self->input, NULL);
+        return NULL;
+    }
+    Py_DECREF(output_result);
+    Py_RETURN_NONE;
+}
+
+static PyObject *tachy_duplex_stop(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->closed || self->input == NULL || self->output == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+
+    PyObject *output_result = tachy_output_stop(self->output, NULL);
+    if (output_result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(output_result);
+
+    PyObject *input_result = tachy_input_stop(self->input, NULL);
+    if (input_result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(input_result);
+    Py_RETURN_NONE;
+}
+
+static PyObject *tachy_duplex_flush(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->closed || self->input == NULL || self->output == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+
+    PyObject *output_result = tachy_output_flush(self->output, NULL);
+    if (output_result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(output_result);
+
+    PyObject *input_result = tachy_input_flush(self->input, NULL);
+    if (input_result == NULL) {
+        return NULL;
+    }
+    Py_DECREF(input_result);
+    Py_RETURN_NONE;
+}
+
+static PyObject *tachy_duplex_close(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (!self->closed) {
+        self->closed = 1;
+        if (self->output != NULL) {
+            PyObject *output_result = tachy_output_close(self->output, NULL);
+            Py_XDECREF(output_result);
+        }
+        if (self->input != NULL) {
+            PyObject *input_result = tachy_input_close(self->input, NULL);
+            Py_XDECREF(input_result);
+        }
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *tachy_duplex_write(TachyDuplexStream *self, PyObject *frames)
+{
+    if (self->closed || self->output == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+    return tachy_output_write(self->output, frames);
+}
+
+static PyObject *tachy_duplex_read(TachyDuplexStream *self, PyObject *args)
+{
+    if (self->closed || self->input == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+    return tachy_input_read(self->input, args);
+}
+
+static PyObject *tachy_duplex_stats(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
+{
+    if (self->closed || self->input == NULL || self->output == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
+        return NULL;
+    }
+
+    PyObject *input_stats = tachy_input_stats(self->input, NULL);
+    if (input_stats == NULL) {
+        return NULL;
+    }
+    PyObject *output_stats = tachy_output_stats(self->output, NULL);
+    if (output_stats == NULL) {
+        Py_DECREF(input_stats);
+        return NULL;
+    }
+    PyObject *stats = Py_BuildValue("{s:O,s:O}", "input", input_stats, "output", output_stats);
+    Py_DECREF(input_stats);
+    Py_DECREF(output_stats);
+    return stats;
+}
+
+static PyMethodDef tachy_duplex_methods[] = {
+    {"start", (PyCFunction)tachy_duplex_start, METH_NOARGS, "Start duplex capture and playback."},
+    {"stop", (PyCFunction)tachy_duplex_stop, METH_NOARGS, "Stop duplex capture and playback."},
+    {"flush", (PyCFunction)tachy_duplex_flush, METH_NOARGS, "Discard queued duplex frames."},
+    {"close", (PyCFunction)tachy_duplex_close, METH_NOARGS, "Close duplex stream."},
+    {"write", (PyCFunction)tachy_duplex_write, METH_O, "Write interleaved output float32 frames."},
+    {"read", (PyCFunction)tachy_duplex_read, METH_VARARGS, "Read available interleaved input float32 frames."},
+    {"stats", (PyCFunction)tachy_duplex_stats, METH_NOARGS, "Return duplex stream statistics."},
+    {NULL, NULL, 0, NULL}
+};
+
+static PyTypeObject TachyDuplexStreamType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "tachyaudio._native.DuplexStream",
+    .tp_basicsize = sizeof(TachyDuplexStream),
+    .tp_itemsize = 0,
+    .tp_dealloc = (destructor)tachy_duplex_dealloc,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Native Core Audio duplex stream.",
+    .tp_methods = tachy_duplex_methods,
+    .tp_new = tachy_duplex_new,
+};
+
 static int tachy_get_cf_string(AudioObjectID object_id, AudioObjectPropertySelector selector, char *buffer, CFIndex buffer_size)
 {
     AudioObjectPropertyAddress address = {
@@ -2446,6 +2699,29 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
     return devices;
 }
 
+typedef struct {
+    PyObject_HEAD
+} TachyDuplexStream;
+
+static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    (void)type;
+    (void)args;
+    (void)kwargs;
+    PyErr_SetString(PyExc_RuntimeError, "native duplex streams are not available on this platform");
+    return NULL;
+}
+
+static PyTypeObject TachyDuplexStreamType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "tachyaudio._native.DuplexStream",
+    .tp_basicsize = sizeof(TachyDuplexStream),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Unavailable native duplex stream.",
+    .tp_new = tachy_duplex_new,
+};
+
 #else
 
 typedef struct {
@@ -2492,6 +2768,29 @@ static PyTypeObject TachyInputStreamType = {
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_doc = "Unavailable native input stream.",
     .tp_new = tachy_input_new,
+};
+
+typedef struct {
+    PyObject_HEAD
+} TachyDuplexStream;
+
+static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    (void)type;
+    (void)args;
+    (void)kwargs;
+    PyErr_SetString(PyExc_RuntimeError, "native duplex streams are not available on this platform");
+    return NULL;
+}
+
+static PyTypeObject TachyDuplexStreamType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "tachyaudio._native.DuplexStream",
+    .tp_basicsize = sizeof(TachyDuplexStream),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_doc = "Unavailable native duplex stream.",
+    .tp_new = tachy_duplex_new,
 };
 
 static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
@@ -2541,6 +2840,9 @@ PyMODINIT_FUNC PyInit__native(void)
     if (PyType_Ready(&TachyInputStreamType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&TachyDuplexStreamType) < 0) {
+        return NULL;
+    }
 
     module = PyModule_Create(&tachy_module);
     if (module == NULL) {
@@ -2557,6 +2859,13 @@ PyMODINIT_FUNC PyInit__native(void)
     Py_INCREF(&TachyInputStreamType);
     if (PyModule_AddObject(module, "InputStream", (PyObject *)&TachyInputStreamType) < 0) {
         Py_DECREF(&TachyInputStreamType);
+        Py_DECREF(module);
+        return NULL;
+    }
+
+    Py_INCREF(&TachyDuplexStreamType);
+    if (PyModule_AddObject(module, "DuplexStream", (PyObject *)&TachyDuplexStreamType) < 0) {
+        Py_DECREF(&TachyDuplexStreamType);
         Py_DECREF(module);
         return NULL;
     }
