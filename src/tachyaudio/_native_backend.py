@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import NoReturn
+
 from tachyaudio import _native
 from tachyaudio._device import DeviceInfo, DeviceKind
+from tachyaudio._errors import BackendUnavailable
 
 
 class NativeOutputStream:
@@ -121,3 +124,7 @@ class NativeBackend:
 
     def open_input_stream(self, config: object) -> NativeInputStream:
         return NativeInputStream(config)
+
+    def open_duplex_stream(self, config: object) -> NoReturn:
+        del config
+        raise BackendUnavailable("native duplex streams are not implemented yet")

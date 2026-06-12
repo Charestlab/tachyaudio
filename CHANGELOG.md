@@ -7,6 +7,11 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- Added the public `DuplexStream` API contract for backend-level full-duplex
+  capture and playback.
+
 ## [0.2.0a3] - 2026-06-12
 
 ### Changed

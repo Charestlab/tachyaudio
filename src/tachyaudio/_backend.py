@@ -42,6 +42,24 @@ class InputStreamHandle(Protocol):
     def stats(self) -> object: ...
 
 
+class DuplexStreamHandle(Protocol):
+    """Backend-owned full-duplex stream handle."""
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def flush(self) -> None: ...
+
+    def close(self) -> None: ...
+
+    def write(self, frames: Any) -> int: ...
+
+    def read(self, frame_count: int) -> memoryview: ...
+
+    def stats(self) -> object: ...
+
+
 class AudioBackend(Protocol):
     """Protocol implemented by concrete audio backends."""
 
@@ -52,6 +70,8 @@ class AudioBackend(Protocol):
     def open_output_stream(self, config: object) -> OutputStreamHandle: ...
 
     def open_input_stream(self, config: object) -> InputStreamHandle: ...
+
+    def open_duplex_stream(self, config: object) -> DuplexStreamHandle: ...
 
 
 class _UnavailableBackend:
@@ -66,6 +86,11 @@ class _UnavailableBackend:
         )
 
     def open_input_stream(self, config: object) -> InputStreamHandle:
+        raise BackendUnavailable(
+            "no tachyaudio backend is available yet; install or build the native backend"
+        )
+
+    def open_duplex_stream(self, config: object) -> DuplexStreamHandle:
         raise BackendUnavailable(
             "no tachyaudio backend is available yet; install or build the native backend"
         )
