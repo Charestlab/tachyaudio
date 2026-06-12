@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 import struct
 import sys
+import time
 
 import tachyaudio as ta
 
@@ -129,6 +130,68 @@ def load_wav(
     return samples, sample_rate, channels, duration
 
 
+def upmix_mono_to_stereo(samples: array) -> array:
+    output = array("f")
+    for sample in samples:
+        output.append(sample)
+        output.append(sample)
+    return output
+
+
+def stream_wav(
+    samples: array,
+    *,
+    sample_rate: int,
+    channels: int,
+    block_size: int,
+    device_id: str | None,
+    prebuffer: float,
+    chunk_frames: int,
+) -> ta.StreamStats:
+    """Play samples through a prebuffered stream to avoid underruns."""
+
+    total_frames = len(samples) // channels
+    target_queue_frames = max(block_size, int(sample_rate * prebuffer))
+    prebuffer_frames = min(total_frames, target_queue_frames)
+    frame_cursor = 0
+
+    stream = ta.OutputStream(
+        sample_rate=sample_rate,
+        channels=channels,
+        block_size=block_size,
+        device_id=device_id,
+    )
+    try:
+        if prebuffer_frames:
+            stream.write_all(
+                samples[: prebuffer_frames * channels],
+                timeout=prebuffer + 2.0,
+            )
+            frame_cursor = prebuffer_frames
+
+        stream.start()
+        while frame_cursor < total_frames:
+            queued_frames = stream.stats().queued_frames
+            if queued_frames >= target_queue_frames:
+                sleep_frames = queued_frames - target_queue_frames + block_size
+                time.sleep(min(0.05, sleep_frames / sample_rate))
+                continue
+
+            writable_frames = min(chunk_frames, target_queue_frames - queued_frames)
+            end_frame = min(frame_cursor + writable_frames, total_frames)
+            stream.write_all(
+                samples[frame_cursor * channels : end_frame * channels],
+                timeout=2.0,
+            )
+            frame_cursor = end_frame
+
+        if not stream.drain(max(2.0, prebuffer + 2.0)):
+            raise TimeoutError("audio playback did not drain before timeout")
+        return stream.stats()
+    finally:
+        stream.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Play an uncompressed WAV file with tachyaudio.")
     parser.add_argument(
@@ -140,7 +203,14 @@ def main() -> None:
     )
     parser.add_argument("--volume", type=float, default=1.0)
     parser.add_argument("--duration", type=float, default=None, help="Optional maximum seconds to play")
-    parser.add_argument("--block-size", type=int, default=256)
+    parser.add_argument("--block-size", type=int, default=1024)
+    parser.add_argument("--chunk-frames", type=int, default=4096)
+    parser.add_argument("--prebuffer", type=float, default=0.25)
+    parser.add_argument(
+        "--mono",
+        action="store_true",
+        help="Keep mono files mono instead of duplicating them to stereo output",
+    )
     parser.add_argument("--device-id", default=None)
     args = parser.parse_args()
 
@@ -148,24 +218,39 @@ def main() -> None:
         raise SystemExit("--volume must be non-negative")
     if args.duration is not None and args.duration <= 0.0:
         raise SystemExit("--duration must be positive")
+    if args.block_size < 1:
+        raise SystemExit("--block-size must be positive")
+    if args.chunk_frames < 1:
+        raise SystemExit("--chunk-frames must be positive")
+    if args.prebuffer < 0.0:
+        raise SystemExit("--prebuffer must be non-negative")
 
     samples, sample_rate, channels, duration = load_wav(
         args.path,
         volume=args.volume,
         max_duration=args.duration,
     )
+    output_channels = channels
+    if channels == 1 and not args.mono:
+        samples = upmix_mono_to_stereo(samples)
+        output_channels = 2
     print(
         f"playing path={args.path} sample_rate={sample_rate} "
-        f"channels={channels} duration={duration:.3f}s"
+        f"source_channels={channels} output_channels={output_channels} "
+        f"duration={duration:.3f}s prebuffer={args.prebuffer:.3f}s"
     )
-    stats = ta.play(
+    started = time.monotonic()
+    stats = stream_wav(
         samples,
         sample_rate=sample_rate,
-        channels=channels,
+        channels=output_channels,
         block_size=args.block_size,
         device_id=args.device_id,
-        timeout=duration + 2.0,
+        prebuffer=args.prebuffer,
+        chunk_frames=args.chunk_frames,
     )
+    elapsed = time.monotonic() - started
+    print(f"elapsed={elapsed:.3f}s")
     print(stats)
 
 
