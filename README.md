@@ -46,8 +46,9 @@ an underrun.
 Use `tachyaudio.play()` for finite stimuli that should start, drain, and close
 as a single operation.
 
-See `examples/play_wav.py` for dependency-free playback of compact PCM WAV
-files exported from an editor such as Audacity.
+See `examples/play_wav.py` for dependency-free playback of WAV files exported
+from an editor such as Audacity. The repository example uses a 48 kHz float WAV
+to avoid runtime resampling.
 
 Use blocking helpers when callers need complete buffer transfer:
 
