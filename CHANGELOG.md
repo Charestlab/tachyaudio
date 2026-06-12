@@ -11,6 +11,8 @@ public APIs may still change while the backend design stabilizes.
 
 - Added the public `DuplexStream` API contract for backend-level full-duplex
   capture and playback.
+- Added native macOS `DuplexStream` support backed by Core Audio input and
+  output queues owned by one native stream object.
 
 ## [0.2.0a3] - 2026-06-12
 
