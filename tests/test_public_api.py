@@ -252,11 +252,19 @@ class PublicApiTests(unittest.TestCase):
         self.assertEqual(stats.estimated_latency, 0.0)
 
     def test_stream_stats_validates_richer_fields(self) -> None:
-        stats = ta.StreamStats(queued_frames=12, queued_latency=0.25, buffer_size=256)
+        stats = ta.StreamStats(
+            hardware_latency=0.01,
+            queued_frames=12,
+            queued_latency=0.25,
+            buffer_size=256,
+        )
+        self.assertEqual(stats.hardware_latency, 0.01)
         self.assertEqual(stats.queued_frames, 12)
         self.assertEqual(stats.queued_latency, 0.25)
         self.assertEqual(stats.buffer_size, 256)
 
+        with self.assertRaises(ValueError):
+            ta.StreamStats(hardware_latency=-0.1)
         with self.assertRaises(ValueError):
             ta.StreamStats(queued_frames=-1)
         with self.assertRaises(ValueError):

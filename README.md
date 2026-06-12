@@ -57,8 +57,11 @@ Lifecycle semantics:
 
 - `frames_processed`: frames consumed by the backend
 - `underruns` / `overruns`: buffer starvation or rejected writes
+- `hardware_latency`: backend-reported device latency in seconds when available
 - `queued_frames`: frames currently waiting in the native ring
 - `queued_latency`: queued ring duration in seconds
+- `estimated_latency`: `queued_latency + hardware_latency` when hardware latency
+  is available, otherwise queued latency
 - `buffer_size`: native callback buffer size in frames
 
 ## Development

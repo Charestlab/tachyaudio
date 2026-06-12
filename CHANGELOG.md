@@ -11,6 +11,9 @@ public APIs may still change while the backend design stabilizes.
 
 - Refactored native ring-buffer and stream-stat helpers without changing public
   behavior.
+- Added `hardware_latency` to stream statistics. macOS reports Core Audio
+  device latency plus safety offset; Linux reports `None` until a reliable
+  miniaudio latency value is available.
 
 ## [0.2.0a2] - 2026-06-10
 
