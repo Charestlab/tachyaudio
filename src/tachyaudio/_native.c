@@ -87,6 +87,7 @@ static PyObject *tachy_build_stream_stats(
     return stats;
 }
 
+#ifdef __linux__
 static PyObject *tachy_build_stream_stats_without_hardware_latency(
     unsigned long long frames_processed,
     unsigned int underruns,
@@ -107,6 +108,7 @@ static PyObject *tachy_build_stream_stats_without_hardware_latency(
         "buffer_size", buffer_size
     );
 }
+#endif
 
 #ifdef __linux__
 #define MA_NO_DECODING
