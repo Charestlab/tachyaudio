@@ -48,7 +48,8 @@ as a single operation.
 
 See `examples/play_wav.py` for dependency-free playback of WAV files exported
 from an editor such as Audacity. The repository example uses a 48 kHz float WAV
-to avoid runtime resampling.
+to avoid runtime resampling. Pass `--eq` to show a lightweight five-band
+terminal meter during playback.
 
 Use blocking helpers when callers need complete buffer transfer:
 
