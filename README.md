@@ -3,9 +3,9 @@
 `tachyaudio` is a low-level audio package intended to replace tachypy’s direct
 dependency on `sounddevice`/PortAudio over time.
 
-Status: pre-alpha. The native backend currently supports macOS through Core
-Audio and Linux through vendored `miniaudio`. Windows support is not implemented
-yet.
+Status: beta. The native backend currently supports macOS through Core Audio and
+Linux through vendored `miniaudio`. Windows support is planned but intentionally
+deferred until Windows test hardware is available.
 
 ## Goals
 

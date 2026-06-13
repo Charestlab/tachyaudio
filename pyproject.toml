@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tachyaudio"
-version = "0.2.0a3"
+version = "0.2.0b1"
 description = "Low-level audio primitives for tachypy and Python experiments."
 readme = "README.md"
 license = "MIT"
@@ -14,7 +14,7 @@ authors = [
   { name = "tachyaudio contributors" }
 ]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Programming Language :: Python :: 3",

@@ -11,7 +11,7 @@
 - Treat Python 3.10 as the lower-bound type-checking target.
 - Add version-specific code only behind narrow compatibility helpers.
 
-## Wheel targets
+## Wheel targets and ABI decision
 
 Initial wheel scope:
 
@@ -24,6 +24,13 @@ Initial wheel scope:
 The native extension currently uses the regular CPython C API. That means wheel
 builds are per-CPython-version. Moving to Python’s stable ABI can be evaluated
 later, but only after the native API settles.
+
+For the public beta, `tachyaudio` intentionally ships per-version CPython
+wheels (`cp310` through `cp314`) rather than `abi3` wheels. This keeps the
+native backend implementation unconstrained while macOS and Linux playback,
+capture, duplex streams, and diagnostics are still evolving. The additional
+wheel matrix is acceptable because cibuildwheel already builds the supported
+Python minors explicitly.
 
 CI should run unit tests on every supported Python minor version before a wheel
 is published.
