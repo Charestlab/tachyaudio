@@ -7,6 +7,8 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+## [0.2.0b2] - 2026-06-19
+
 ### Added
 
 - Added Windows native backend support through vendored `miniaudio` using

@@ -11,12 +11,12 @@ of `abi3` wheels.
    ```bash
    git checkout main
    git pull --ff-only
-   git tag -a v0.2.0b1 -m "v0.2.0b1"
-   git push origin v0.2.0b1
+   git tag -a vX.Y.Z -m "vX.Y.Z"
+   git push origin vX.Y.Z
    ```
 
 3. Wait for the GitHub Actions `wheels` workflow to finish for the tag.
-4. Download the `linux-wheels` and `macos-wheels` artifacts.
+4. Download the `linux-wheels`, `macos-wheels`, and `windows-wheels` artifacts.
 5. Build the source distribution from the tagged commit:
 
    ```bash
@@ -47,5 +47,5 @@ of `abi3` wheels.
 
 ## Windows support
 
-Windows wheels are intentionally not published until WASAPI support has been
-implemented and validated on Windows hardware.
+Windows wheels are published for 64-bit CPython once the Windows CI wheel job
+passes for the release tag.
