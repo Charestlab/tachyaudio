@@ -7,6 +7,7 @@ from setuptools import Extension, setup
 
 extra_link_args: list[str] = []
 extra_compile_args: list[str] = []
+libraries: list[str] = []
 
 if sys.platform == "darwin":
     extra_link_args.extend(
@@ -15,6 +16,8 @@ if sys.platform == "darwin":
 elif sys.platform.startswith("linux"):
     extra_compile_args.append("-pthread")
     extra_link_args.extend(["-pthread", "-ldl", "-lm"])
+elif sys.platform == "win32":
+    libraries.extend(["ole32", "uuid", "avrt"])
 
 
 setup(
@@ -24,6 +27,7 @@ setup(
             sources=["src/tachyaudio/_native.c"],
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
+            libraries=libraries,
         )
     ]
 )

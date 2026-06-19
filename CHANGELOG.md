@@ -7,6 +7,17 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- Added Windows native backend support through vendored `miniaudio` using
+  WASAPI.
+- Added Windows CI test coverage and Windows wheel build artifacts.
+
+### Changed
+
+- Shared the miniaudio stream implementation across Linux and Windows with a
+  small native lock/sleep portability layer.
+
 ## [0.2.0b1] - 2026-06-12
 
 ### Added
