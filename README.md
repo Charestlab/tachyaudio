@@ -3,9 +3,9 @@
 `tachyaudio` is a low-level audio package intended to replace tachypy’s direct
 dependency on `sounddevice`/PortAudio over time.
 
-Status: beta. The native backend currently supports macOS through Core Audio and
-Linux through vendored `miniaudio`. Windows support is planned but intentionally
-deferred until Windows test hardware is available.
+Status: beta. The native backend currently supports macOS through Core Audio,
+Linux through vendored `miniaudio`, and Windows through vendored `miniaudio`
+using WASAPI.
 
 ## Goals
 
@@ -37,7 +37,7 @@ stats = ta.play(samples, sample_rate=48_000, channels=2)
 ```
 
 The native backend currently supports device enumeration, float32 output
-playback, and nonblocking float32 input capture on macOS and Linux.
+playback, and nonblocking float32 input capture on macOS, Linux, and Windows.
 
 `OutputStream` is currently a continuous stream. Write audio before or during
 playback; if the stream runs out of queued frames it outputs silence and counts
@@ -58,8 +58,8 @@ Use blocking helpers when callers need complete buffer transfer:
 - `InputStream.read_exactly(frame_count, timeout=None)`: wait until exactly the
   requested number of frames has been captured
 
-Full-duplex capture/playback is exposed as `DuplexStream`. Native macOS and
-Linux support is available.
+Full-duplex capture/playback is exposed as `DuplexStream`. Native macOS, Linux,
+and Windows support is available.
 
 Lifecycle semantics:
 
@@ -111,8 +111,9 @@ PYTHONPATH=src python3 examples/capture_level.py
 frames up to `frame_count`.
 
 On macOS, a restricted sandbox may hide Core Audio devices. On Linux, sandboxed
-processes may be unable to reach the user PipeWire/PulseAudio server. If
-`tachyaudio.list_devices()` returns an empty tuple or only generic ALSA devices
-in a sandboxed environment, verify from an unsandboxed terminal before debugging
-the backend. Headless Linux containers may return no devices while still being
-able to build and import the native extension.
+processes may be unable to reach the user PipeWire/PulseAudio server. On
+Windows, remote/headless sessions may expose different WASAPI endpoints than an
+interactive desktop login. If `tachyaudio.list_devices()` returns an empty tuple
+or unexpected devices in a sandboxed environment, verify from an unsandboxed
+terminal before debugging the backend. Headless Linux containers may return no
+devices while still being able to build and import the native extension.

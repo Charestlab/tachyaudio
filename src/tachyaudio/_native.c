@@ -1,6 +1,11 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <pthread.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +15,66 @@
 #define TACHY_INPUT_BUFFER_COUNT 3
 #define TACHY_DEFAULT_BUFFER_MS 10
 #define TACHY_RING_SECONDS 1
+
+#ifdef _WIN32
+typedef CRITICAL_SECTION tachy_mutex_t;
+
+static int tachy_mutex_init(tachy_mutex_t *lock)
+{
+    InitializeCriticalSection(lock);
+    return 0;
+}
+
+static void tachy_mutex_destroy(tachy_mutex_t *lock)
+{
+    DeleteCriticalSection(lock);
+}
+
+static void tachy_mutex_lock(tachy_mutex_t *lock)
+{
+    EnterCriticalSection(lock);
+}
+
+static void tachy_mutex_unlock(tachy_mutex_t *lock)
+{
+    LeaveCriticalSection(lock);
+}
+
+static void tachy_sleep_ms(unsigned int milliseconds)
+{
+    Sleep(milliseconds);
+}
+#else
+typedef pthread_mutex_t tachy_mutex_t;
+
+static int tachy_mutex_init(tachy_mutex_t *lock)
+{
+    return pthread_mutex_init(lock, NULL);
+}
+
+static void tachy_mutex_destroy(tachy_mutex_t *lock)
+{
+    pthread_mutex_destroy(lock);
+}
+
+static void tachy_mutex_lock(tachy_mutex_t *lock)
+{
+    pthread_mutex_lock(lock);
+}
+
+static void tachy_mutex_unlock(tachy_mutex_t *lock)
+{
+    pthread_mutex_unlock(lock);
+}
+
+static void tachy_sleep_ms(unsigned int milliseconds)
+{
+    struct timespec sleep_time;
+    sleep_time.tv_sec = (time_t)(milliseconds / 1000);
+    sleep_time.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
+    nanosleep(&sleep_time, NULL);
+}
+#endif
 
 static size_t tachy_min_size(size_t left, size_t right)
 {
@@ -87,7 +152,7 @@ static PyObject *tachy_build_stream_stats(
     return stats;
 }
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
 static PyObject *tachy_build_stream_stats_without_hardware_latency(
     unsigned long long frames_processed,
     unsigned int underruns,
@@ -110,7 +175,7 @@ static PyObject *tachy_build_stream_stats_without_hardware_latency(
 }
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(_WIN32)
 #define MA_NO_DECODING
 #define MA_NO_ENCODING
 #define MINIAUDIO_IMPLEMENTATION
@@ -142,7 +207,7 @@ typedef struct {
     size_t ring_read;
     size_t ring_write;
     size_t ring_size;
-    pthread_mutex_t lock;
+    tachy_mutex_t lock;
     int lock_initialized;
     int started;
     int closed;
@@ -167,7 +232,7 @@ typedef struct {
     size_t ring_read;
     size_t ring_write;
     size_t ring_size;
-    pthread_mutex_t lock;
+    tachy_mutex_t lock;
     int lock_initialized;
     int started;
     int closed;
@@ -228,7 +293,7 @@ static size_t tachy_ring_copy_out(TachyOutputStream *stream, uint8_t *target, si
 
 static void tachy_fill_output_buffer(TachyOutputStream *stream, AudioQueueBufferRef buffer)
 {
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     size_t copied = tachy_ring_copy_out(stream, (uint8_t *)buffer->mAudioData, stream->buffer_byte_size);
     if (copied < stream->buffer_byte_size) {
         memset((uint8_t *)buffer->mAudioData + copied, 0, stream->buffer_byte_size - copied);
@@ -237,7 +302,7 @@ static void tachy_fill_output_buffer(TachyOutputStream *stream, AudioQueueBuffer
         }
     }
     stream->frames_processed += stream->buffer_byte_size / stream->bytes_per_frame;
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 
     buffer->mAudioDataByteSize = stream->buffer_byte_size;
 }
@@ -251,9 +316,9 @@ static int tachy_enqueue_output_buffer(TachyOutputStream *stream, AudioQueueBuff
         return 0;
     }
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     stream->pending_buffers += 1;
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
     return 1;
 }
 
@@ -262,7 +327,7 @@ static void tachy_output_callback(void *user_data, AudioQueueRef queue, AudioQue
     (void)queue;
     TachyOutputStream *stream = (TachyOutputStream *)user_data;
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     if (stream->pending_buffers > 0) {
         stream->pending_buffers -= 1;
     }
@@ -271,7 +336,7 @@ static void tachy_output_callback(void *user_data, AudioQueueRef queue, AudioQue
         stream->started = 0;
         should_continue = 0;
     }
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 
     if (should_continue) {
         (void)tachy_enqueue_output_buffer(stream, buffer);
@@ -405,7 +470,7 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
         return PyErr_NoMemory();
     }
 
-    if (pthread_mutex_init(&self->lock, NULL) != 0) {
+    if (tachy_mutex_init(&self->lock) != 0) {
         PyMem_RawFree(self->ring);
         self->ring = NULL;
         Py_DECREF(self);
@@ -471,17 +536,17 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
 static void tachy_output_dealloc(TachyOutputStream *self)
 {
     if (!self->closed && self->queue != NULL) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->closed = 1;
         self->started = 0;
         self->pending_buffers = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         AudioQueueStop(self->queue, true);
         AudioQueueDispose(self->queue, true);
         self->queue = NULL;
     }
     if (self->lock_initialized) {
-        pthread_mutex_destroy(&self->lock);
+        tachy_mutex_destroy(&self->lock);
         self->lock_initialized = 0;
     }
     if (self->ring != NULL) {
@@ -502,17 +567,17 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
         Py_RETURN_NONE;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->started = 1;
     self->pending_buffers = 0;
     self->draining = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     for (UInt32 index = 0; index < TACHY_OUTPUT_BUFFER_COUNT; index++) {
         if (!tachy_enqueue_output_buffer(self, self->buffers[index])) {
-            pthread_mutex_lock(&self->lock);
+            tachy_mutex_lock(&self->lock);
             self->started = 0;
-            pthread_mutex_unlock(&self->lock);
+            tachy_mutex_unlock(&self->lock);
             PyErr_SetString(PyExc_RuntimeError, "failed to enqueue Core Audio output buffer");
             return NULL;
         }
@@ -520,9 +585,9 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
 
     OSStatus status = AudioQueueStart(self->queue, NULL);
     if (status != noErr) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->started = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         PyErr_SetString(PyExc_RuntimeError, "failed to start Core Audio output queue");
         return NULL;
     }
@@ -537,11 +602,11 @@ static PyObject *tachy_output_stop(TachyOutputStream *self, PyObject *Py_UNUSED(
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->started = 0;
     self->pending_buffers = 0;
     self->draining = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     OSStatus status = AudioQueueStop(self->queue, false);
     if (status != noErr) {
@@ -566,20 +631,16 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
         return NULL;
     }
 
-    struct timespec sleep_time;
-    sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 1000000;
-
     struct timespec start_time;
     if (timeout >= 0.0) {
         timespec_get(&start_time, TIME_UTC);
     }
 
     for (;;) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->draining = 1;
         int empty = self->ring_size == 0 && self->pending_buffers == 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
 
         if (empty) {
             Py_RETURN_TRUE;
@@ -596,7 +657,7 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
         }
 
         Py_BEGIN_ALLOW_THREADS
-        nanosleep(&sleep_time, NULL);
+        tachy_sleep_ms(1);
         Py_END_ALLOW_THREADS
     }
 }
@@ -608,12 +669,12 @@ static PyObject *tachy_output_flush(TachyOutputStream *self, PyObject *Py_UNUSED
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->ring_read = 0;
     self->ring_write = 0;
     self->ring_size = 0;
     self->draining = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     Py_RETURN_NONE;
 }
@@ -621,12 +682,12 @@ static PyObject *tachy_output_flush(TachyOutputStream *self, PyObject *Py_UNUSED
 static PyObject *tachy_output_close(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
     if (!self->closed && self->queue != NULL) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->closed = 1;
         self->started = 0;
         self->pending_buffers = 0;
         self->draining = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         AudioQueueStop(self->queue, true);
         AudioQueueDispose(self->queue, true);
         self->queue = NULL;
@@ -653,7 +714,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t available = self->ring_capacity - self->ring_size;
     size_t accepted = tachy_min_size((size_t)view.len, available);
     accepted -= accepted % self->bytes_per_frame;
@@ -664,7 +725,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
         self->draining = 0;
         tachy_ring_copy_in(self, (const uint8_t *)view.buf, accepted);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
     PyBuffer_Release(&view);
 
     UInt64 frames_written = accepted / self->bytes_per_frame;
@@ -673,7 +734,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
 
 static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     UInt64 frames_processed = self->frames_processed;
     UInt32 underruns = self->underruns;
     UInt32 overruns = self->overruns;
@@ -686,7 +747,7 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
         estimated_latency = (double)queued_frames / self->format.mSampleRate;
     }
     double queued_latency = estimated_latency;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return tachy_build_stream_stats(
         frames_processed,
@@ -737,7 +798,7 @@ static void tachy_input_callback(
 
     TachyInputStream *stream = (TachyInputStream *)user_data;
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     if (!stream->closed && buffer->mAudioDataByteSize > 0) {
         size_t incoming = buffer->mAudioDataByteSize;
         incoming -= incoming % stream->bytes_per_frame;
@@ -753,7 +814,7 @@ static void tachy_input_callback(
         }
     }
     int should_continue = stream->started && !stream->closed;
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 
     if (should_continue) {
         (void)AudioQueueEnqueueBuffer(stream->queue, buffer, 0, NULL);
@@ -840,7 +901,7 @@ static PyObject *tachy_input_new(PyTypeObject *type, PyObject *args, PyObject *k
         return PyErr_NoMemory();
     }
 
-    if (pthread_mutex_init(&self->lock, NULL) != 0) {
+    if (tachy_mutex_init(&self->lock) != 0) {
         PyMem_RawFree(self->ring);
         self->ring = NULL;
         Py_DECREF(self);
@@ -906,16 +967,16 @@ static PyObject *tachy_input_new(PyTypeObject *type, PyObject *args, PyObject *k
 static void tachy_input_dealloc(TachyInputStream *self)
 {
     if (!self->closed && self->queue != NULL) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->closed = 1;
         self->started = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         AudioQueueStop(self->queue, true);
         AudioQueueDispose(self->queue, true);
         self->queue = NULL;
     }
     if (self->lock_initialized) {
-        pthread_mutex_destroy(&self->lock);
+        tachy_mutex_destroy(&self->lock);
         self->lock_initialized = 0;
     }
     if (self->ring != NULL) {
@@ -936,16 +997,16 @@ static PyObject *tachy_input_start(TachyInputStream *self, PyObject *Py_UNUSED(i
         Py_RETURN_NONE;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->started = 1;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     for (UInt32 index = 0; index < TACHY_INPUT_BUFFER_COUNT; index++) {
         OSStatus enqueue_status = AudioQueueEnqueueBuffer(self->queue, self->buffers[index], 0, NULL);
         if (enqueue_status != noErr) {
-            pthread_mutex_lock(&self->lock);
+            tachy_mutex_lock(&self->lock);
             self->started = 0;
-            pthread_mutex_unlock(&self->lock);
+            tachy_mutex_unlock(&self->lock);
             PyErr_SetString(PyExc_RuntimeError, "failed to enqueue Core Audio input buffer");
             return NULL;
         }
@@ -953,9 +1014,9 @@ static PyObject *tachy_input_start(TachyInputStream *self, PyObject *Py_UNUSED(i
 
     OSStatus status = AudioQueueStart(self->queue, NULL);
     if (status != noErr) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->started = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         PyErr_SetString(PyExc_RuntimeError, "failed to start Core Audio input queue");
         return NULL;
     }
@@ -970,9 +1031,9 @@ static PyObject *tachy_input_stop(TachyInputStream *self, PyObject *Py_UNUSED(ig
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->started = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     OSStatus status = AudioQueueStop(self->queue, false);
     if (status != noErr) {
@@ -986,10 +1047,10 @@ static PyObject *tachy_input_stop(TachyInputStream *self, PyObject *Py_UNUSED(ig
 static PyObject *tachy_input_close(TachyInputStream *self, PyObject *Py_UNUSED(ignored))
 {
     if (!self->closed && self->queue != NULL) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         self->closed = 1;
         self->started = 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
         AudioQueueStop(self->queue, true);
         AudioQueueDispose(self->queue, true);
         self->queue = NULL;
@@ -1015,7 +1076,7 @@ static PyObject *tachy_input_read(TachyInputStream *self, PyObject *args)
 
     size_t requested = (size_t)frame_count * self->bytes_per_frame;
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t copied = tachy_min_size(requested, self->ring_size);
     copied -= copied % self->bytes_per_frame;
     if (copied < requested) {
@@ -1026,7 +1087,7 @@ static PyObject *tachy_input_read(TachyInputStream *self, PyObject *args)
         char *target = PyBytes_AS_STRING(result);
         (void)tachy_input_ring_copy_out(self, (uint8_t *)target, copied);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return result;
 }
@@ -1038,18 +1099,18 @@ static PyObject *tachy_input_flush(TachyInputStream *self, PyObject *Py_UNUSED(i
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->ring_read = 0;
     self->ring_write = 0;
     self->ring_size = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     Py_RETURN_NONE;
 }
 
 static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(ignored))
 {
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     UInt64 frames_processed = self->frames_processed;
     UInt32 underruns = self->underruns;
     UInt32 overruns = self->overruns;
@@ -1062,7 +1123,7 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
         estimated_latency = (double)queued_frames / self->format.mSampleRate;
     }
     double queued_latency = estimated_latency;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return tachy_build_stream_stats(
         frames_processed,
@@ -1640,7 +1701,7 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
     return devices;
 }
 
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
 
 typedef struct {
     PyObject_HEAD
@@ -1659,7 +1720,7 @@ typedef struct {
     size_t ring_read;
     size_t ring_write;
     size_t ring_size;
-    pthread_mutex_t lock;
+    tachy_mutex_t lock;
     int lock_initialized;
     int context_initialized;
     int device_initialized;
@@ -1684,7 +1745,7 @@ typedef struct {
     size_t ring_read;
     size_t ring_write;
     size_t ring_size;
-    pthread_mutex_t lock;
+    tachy_mutex_t lock;
     int lock_initialized;
     int context_initialized;
     int device_initialized;
@@ -1694,13 +1755,54 @@ typedef struct {
 
 static ma_result tachy_miniaudio_context_init(ma_context *context)
 {
+#ifdef _WIN32
+    ma_backend backends[] = {
+        ma_backend_wasapi,
+    };
+#else
     ma_backend backends[] = {
         ma_backend_pulseaudio,
         ma_backend_alsa,
     };
+#endif
 
     return ma_context_init(backends, sizeof(backends) / sizeof(backends[0]), NULL, context);
 }
+
+#ifdef _WIN32
+static int tachy_miniaudio_utf8_to_wasapi_id(ma_wchar_win32 *target, size_t target_count, const char *source)
+{
+    int converted = MultiByteToWideChar(
+        CP_UTF8,
+        MB_ERR_INVALID_CHARS,
+        source,
+        -1,
+        target,
+        (int)target_count);
+    if (converted == 0) {
+        PyErr_SetString(PyExc_ValueError, "Windows device_id must be valid UTF-8");
+        return 0;
+    }
+    return 1;
+}
+
+static int tachy_miniaudio_wasapi_id_to_utf8(
+    const ma_wchar_win32 *source,
+    char *target,
+    size_t target_size)
+{
+    int converted = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        source,
+        -1,
+        target,
+        (int)target_size,
+        NULL,
+        NULL);
+    return converted != 0;
+}
+#endif
 
 static void tachy_miniaudio_ring_copy_in(TachyOutputStream *stream, const uint8_t *source, size_t byte_count)
 {
@@ -1734,14 +1836,14 @@ static void tachy_miniaudio_output_callback(
     TachyOutputStream *stream = (TachyOutputStream *)device->pUserData;
     size_t byte_count = (size_t)frame_count * stream->bytes_per_frame;
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     size_t copied = tachy_miniaudio_ring_copy_out(stream, (uint8_t *)output, byte_count);
     if (copied < byte_count) {
         memset((uint8_t *)output + copied, 0, byte_count - copied);
         stream->underruns += 1;
     }
     stream->frames_processed += frame_count;
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 }
 
 static int tachy_miniaudio_set_device_id(
@@ -1756,7 +1858,7 @@ static int tachy_miniaudio_set_device_id(
     const char *prefix = "output-";
     size_t prefix_length = strlen(prefix);
     if (strncmp(device_id, prefix, prefix_length) != 0) {
-        PyErr_SetString(PyExc_ValueError, "Linux output device_id must come from an output device");
+        PyErr_SetString(PyExc_ValueError, "output device_id must come from an output device");
         return 0;
     }
 
@@ -1764,6 +1866,16 @@ static int tachy_miniaudio_set_device_id(
     memset(&stream->device_id, 0, sizeof(stream->device_id));
 
     switch (stream->context.backend) {
+#ifdef _WIN32
+        case ma_backend_wasapi:
+            if (!tachy_miniaudio_utf8_to_wasapi_id(
+                    stream->device_id.wasapi,
+                    sizeof(stream->device_id.wasapi) / sizeof(stream->device_id.wasapi[0]),
+                    backend_id)) {
+                return 0;
+            }
+            break;
+#endif
         case ma_backend_alsa:
             snprintf(stream->device_id.alsa, sizeof(stream->device_id.alsa), "%s", backend_id);
             break;
@@ -1783,7 +1895,7 @@ static int tachy_miniaudio_set_device_id(
             snprintf(stream->device_id.oss, sizeof(stream->device_id.oss), "%s", backend_id);
             break;
         default:
-            PyErr_SetString(PyExc_ValueError, "selected Linux audio backend does not support explicit device_id yet");
+            PyErr_SetString(PyExc_ValueError, "selected audio backend does not support explicit output device_id yet");
             return 0;
     }
 
@@ -1869,7 +1981,7 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
         return PyErr_NoMemory();
     }
 
-    if (pthread_mutex_init(&self->lock, NULL) != 0) {
+    if (tachy_mutex_init(&self->lock) != 0) {
         Py_DECREF(self);
         PyErr_SetString(PyExc_RuntimeError, "failed to initialize output stream lock");
         return NULL;
@@ -1922,7 +2034,7 @@ static void tachy_output_dealloc(TachyOutputStream *self)
         self->context_initialized = 0;
     }
     if (self->lock_initialized) {
-        pthread_mutex_destroy(&self->lock);
+        tachy_mutex_destroy(&self->lock);
         self->lock_initialized = 0;
     }
     if (self->ring != NULL) {
@@ -1984,19 +2096,15 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
         return NULL;
     }
 
-    struct timespec sleep_time;
-    sleep_time.tv_sec = 0;
-    sleep_time.tv_nsec = 1000000;
-
     struct timespec start_time;
     if (timeout >= 0.0) {
         timespec_get(&start_time, TIME_UTC);
     }
 
     for (;;) {
-        pthread_mutex_lock(&self->lock);
+        tachy_mutex_lock(&self->lock);
         int empty = self->ring_size == 0;
-        pthread_mutex_unlock(&self->lock);
+        tachy_mutex_unlock(&self->lock);
 
         if (empty) {
             Py_RETURN_TRUE;
@@ -2013,7 +2121,7 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
         }
 
         Py_BEGIN_ALLOW_THREADS
-        nanosleep(&sleep_time, NULL);
+        tachy_sleep_ms(1);
         Py_END_ALLOW_THREADS
     }
 }
@@ -2025,11 +2133,11 @@ static PyObject *tachy_output_flush(TachyOutputStream *self, PyObject *Py_UNUSED
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->ring_read = 0;
     self->ring_write = 0;
     self->ring_size = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     Py_RETURN_NONE;
 }
@@ -2070,7 +2178,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t available = self->ring_capacity - self->ring_size;
     size_t accepted = tachy_min_size((size_t)view.len, available);
     accepted -= accepted % self->bytes_per_frame;
@@ -2080,7 +2188,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
     if (accepted > 0) {
         tachy_miniaudio_ring_copy_in(self, (const uint8_t *)view.buf, accepted);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
     PyBuffer_Release(&view);
 
     ma_uint64 frames_written = accepted / self->bytes_per_frame;
@@ -2089,7 +2197,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
 
 static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     ma_uint64 frames_processed = self->frames_processed;
     ma_uint32 underruns = self->underruns;
     ma_uint32 overruns = self->overruns;
@@ -2101,7 +2209,7 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
     }
     double queued_latency = estimated_latency;
     ma_uint32 buffer_size = self->buffer_frames;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return tachy_build_stream_stats_without_hardware_latency(
         frames_processed,
@@ -2177,7 +2285,7 @@ static void tachy_miniaudio_input_callback(
 
     size_t byte_count = (size_t)frame_count * stream->bytes_per_frame;
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     size_t available = stream->ring_capacity - stream->ring_size;
     size_t accepted = tachy_min_size(byte_count, available);
     accepted -= accepted % stream->bytes_per_frame;
@@ -2188,7 +2296,7 @@ static void tachy_miniaudio_input_callback(
         tachy_miniaudio_input_ring_copy_in(stream, (const uint8_t *)input, accepted);
         stream->frames_processed += accepted / stream->bytes_per_frame;
     }
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 }
 
 static int tachy_miniaudio_set_input_device_id(
@@ -2203,7 +2311,7 @@ static int tachy_miniaudio_set_input_device_id(
     const char *prefix = "input-";
     size_t prefix_length = strlen(prefix);
     if (strncmp(device_id, prefix, prefix_length) != 0) {
-        PyErr_SetString(PyExc_ValueError, "Linux input device_id must come from an input device");
+        PyErr_SetString(PyExc_ValueError, "input device_id must come from an input device");
         return 0;
     }
 
@@ -2211,6 +2319,16 @@ static int tachy_miniaudio_set_input_device_id(
     memset(&stream->device_id, 0, sizeof(stream->device_id));
 
     switch (stream->context.backend) {
+#ifdef _WIN32
+        case ma_backend_wasapi:
+            if (!tachy_miniaudio_utf8_to_wasapi_id(
+                    stream->device_id.wasapi,
+                    sizeof(stream->device_id.wasapi) / sizeof(stream->device_id.wasapi[0]),
+                    backend_id)) {
+                return 0;
+            }
+            break;
+#endif
         case ma_backend_alsa:
             snprintf(stream->device_id.alsa, sizeof(stream->device_id.alsa), "%s", backend_id);
             break;
@@ -2230,7 +2348,7 @@ static int tachy_miniaudio_set_input_device_id(
             snprintf(stream->device_id.oss, sizeof(stream->device_id.oss), "%s", backend_id);
             break;
         default:
-            PyErr_SetString(PyExc_ValueError, "selected Linux audio backend does not support explicit device_id yet");
+            PyErr_SetString(PyExc_ValueError, "selected audio backend does not support explicit input device_id yet");
             return 0;
     }
 
@@ -2316,7 +2434,7 @@ static PyObject *tachy_input_new(PyTypeObject *type, PyObject *args, PyObject *k
         return PyErr_NoMemory();
     }
 
-    if (pthread_mutex_init(&self->lock, NULL) != 0) {
+    if (tachy_mutex_init(&self->lock) != 0) {
         Py_DECREF(self);
         PyErr_SetString(PyExc_RuntimeError, "failed to initialize input stream lock");
         return NULL;
@@ -2369,7 +2487,7 @@ static void tachy_input_dealloc(TachyInputStream *self)
         self->context_initialized = 0;
     }
     if (self->lock_initialized) {
-        pthread_mutex_destroy(&self->lock);
+        tachy_mutex_destroy(&self->lock);
         self->lock_initialized = 0;
     }
     if (self->ring != NULL) {
@@ -2452,7 +2570,7 @@ static PyObject *tachy_input_read(TachyInputStream *self, PyObject *args)
 
     size_t requested = (size_t)frame_count * self->bytes_per_frame;
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t copied = tachy_min_size(requested, self->ring_size);
     copied -= copied % self->bytes_per_frame;
     if (copied < requested) {
@@ -2463,7 +2581,7 @@ static PyObject *tachy_input_read(TachyInputStream *self, PyObject *args)
         char *target = PyBytes_AS_STRING(result);
         (void)tachy_miniaudio_input_ring_copy_out(self, (uint8_t *)target, copied);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return result;
 }
@@ -2475,18 +2593,18 @@ static PyObject *tachy_input_flush(TachyInputStream *self, PyObject *Py_UNUSED(i
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->ring_read = 0;
     self->ring_write = 0;
     self->ring_size = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     Py_RETURN_NONE;
 }
 
 static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(ignored))
 {
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     ma_uint64 frames_processed = self->frames_processed;
     ma_uint32 underruns = self->underruns;
     ma_uint32 overruns = self->overruns;
@@ -2498,7 +2616,7 @@ static PyObject *tachy_input_stats(TachyInputStream *self, PyObject *Py_UNUSED(i
     }
     double queued_latency = estimated_latency;
     ma_uint32 buffer_size = self->buffer_frames;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return tachy_build_stream_stats_without_hardware_latency(
         frames_processed,
@@ -2547,6 +2665,16 @@ static void tachy_miniaudio_id_to_string(
     }
 
     switch (backend) {
+#ifdef _WIN32
+        case ma_backend_wasapi:
+            if (tachy_miniaudio_wasapi_id_to_utf8(id->wasapi, buffer, buffer_size)) {
+                char backend_id[sizeof(ma_device_id) * 2 + 16] = {0};
+                snprintf(backend_id, sizeof(backend_id), "%s", buffer);
+                (void)snprintf(buffer, buffer_size, "%s-%s", kind, backend_id);
+                return;
+            }
+            break;
+#endif
         case ma_backend_alsa:
             backend_id = id->alsa;
             break;
@@ -2727,7 +2855,7 @@ typedef struct {
     size_t output_ring_read;
     size_t output_ring_write;
     size_t output_ring_size;
-    pthread_mutex_t lock;
+    tachy_mutex_t lock;
     int lock_initialized;
     int context_initialized;
     int device_initialized;
@@ -2812,6 +2940,16 @@ static int tachy_miniaudio_fill_device_id(
     memset(target, 0, sizeof(*target));
 
     switch (backend) {
+#ifdef _WIN32
+        case ma_backend_wasapi:
+            if (!tachy_miniaudio_utf8_to_wasapi_id(
+                    target->wasapi,
+                    sizeof(target->wasapi) / sizeof(target->wasapi[0]),
+                    backend_id)) {
+                return 0;
+            }
+            break;
+#endif
         case ma_backend_alsa:
             snprintf(target->alsa, sizeof(target->alsa), "%s", backend_id);
             break;
@@ -2833,7 +2971,7 @@ static int tachy_miniaudio_fill_device_id(
         default:
             PyErr_SetString(
                 PyExc_ValueError,
-                "selected Linux audio backend does not support explicit device_id yet");
+                "selected audio backend does not support explicit device_id yet");
             return 0;
     }
 
@@ -2850,7 +2988,7 @@ static void tachy_miniaudio_duplex_callback(
     size_t input_byte_count = (size_t)frame_count * stream->input_bytes_per_frame;
     size_t output_byte_count = (size_t)frame_count * stream->output_bytes_per_frame;
 
-    pthread_mutex_lock(&stream->lock);
+    tachy_mutex_lock(&stream->lock);
     if (input != NULL) {
         size_t available = stream->input_ring_capacity - stream->input_ring_size;
         size_t accepted = tachy_min_size(input_byte_count, available);
@@ -2875,7 +3013,7 @@ static void tachy_miniaudio_duplex_callback(
         }
         stream->output_frames_processed += frame_count;
     }
-    pthread_mutex_unlock(&stream->lock);
+    tachy_mutex_unlock(&stream->lock);
 }
 
 static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
@@ -2965,7 +3103,7 @@ static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *
         return PyErr_NoMemory();
     }
 
-    if (pthread_mutex_init(&self->lock, NULL) != 0) {
+    if (tachy_mutex_init(&self->lock) != 0) {
         Py_DECREF(self);
         PyErr_SetString(PyExc_RuntimeError, "failed to initialize duplex stream lock");
         return NULL;
@@ -2996,7 +3134,7 @@ static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *
             &self->input_device_id,
             input_device_id,
             "input-",
-            "Linux input_device_id must come from an input device")) {
+            "input_device_id must come from an input device")) {
         Py_DECREF(self);
         return NULL;
     }
@@ -3009,7 +3147,7 @@ static PyObject *tachy_duplex_new(PyTypeObject *type, PyObject *args, PyObject *
             &self->output_device_id,
             output_device_id,
             "output-",
-            "Linux output_device_id must come from an output device")) {
+            "output_device_id must come from an output device")) {
         Py_DECREF(self);
         return NULL;
     }
@@ -3041,7 +3179,7 @@ static void tachy_duplex_dealloc(TachyDuplexStream *self)
         self->context_initialized = 0;
     }
     if (self->lock_initialized) {
-        pthread_mutex_destroy(&self->lock);
+        tachy_mutex_destroy(&self->lock);
         self->lock_initialized = 0;
     }
     if (self->input_ring != NULL) {
@@ -3100,14 +3238,14 @@ static PyObject *tachy_duplex_flush(TachyDuplexStream *self, PyObject *Py_UNUSED
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     self->input_ring_read = 0;
     self->input_ring_write = 0;
     self->input_ring_size = 0;
     self->output_ring_read = 0;
     self->output_ring_write = 0;
     self->output_ring_size = 0;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     Py_RETURN_NONE;
 }
@@ -3148,7 +3286,7 @@ static PyObject *tachy_duplex_write(TachyDuplexStream *self, PyObject *frames)
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t available = self->output_ring_capacity - self->output_ring_size;
     size_t accepted = tachy_min_size((size_t)view.len, available);
     accepted -= accepted % self->output_bytes_per_frame;
@@ -3158,7 +3296,7 @@ static PyObject *tachy_duplex_write(TachyDuplexStream *self, PyObject *frames)
     if (accepted > 0) {
         tachy_miniaudio_duplex_output_ring_copy_in(self, (const uint8_t *)view.buf, accepted);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
     PyBuffer_Release(&view);
 
     ma_uint64 frames_written = accepted / self->output_bytes_per_frame;
@@ -3182,7 +3320,7 @@ static PyObject *tachy_duplex_read(TachyDuplexStream *self, PyObject *args)
 
     size_t requested = (size_t)frame_count * self->input_bytes_per_frame;
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     size_t copied = tachy_min_size(requested, self->input_ring_size);
     copied -= copied % self->input_bytes_per_frame;
     if (copied < requested) {
@@ -3193,7 +3331,7 @@ static PyObject *tachy_duplex_read(TachyDuplexStream *self, PyObject *args)
         char *target = PyBytes_AS_STRING(result);
         (void)tachy_miniaudio_duplex_input_ring_copy_out(self, (uint8_t *)target, copied);
     }
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     return result;
 }
@@ -3205,7 +3343,7 @@ static PyObject *tachy_duplex_stats(TachyDuplexStream *self, PyObject *Py_UNUSED
         return NULL;
     }
 
-    pthread_mutex_lock(&self->lock);
+    tachy_mutex_lock(&self->lock);
     ma_uint64 input_frames_processed = self->input_frames_processed;
     ma_uint32 input_underruns = self->input_underruns;
     ma_uint32 input_overruns = self->input_overruns;
@@ -3226,7 +3364,7 @@ static PyObject *tachy_duplex_stats(TachyDuplexStream *self, PyObject *Py_UNUSED
         output_queued_latency = (double)output_queued_frames / self->sample_rate;
     }
     ma_uint32 buffer_size = self->buffer_frames;
-    pthread_mutex_unlock(&self->lock);
+    tachy_mutex_unlock(&self->lock);
 
     PyObject *input_stats = tachy_build_stream_stats_without_hardware_latency(
         input_frames_processed,
@@ -3367,7 +3505,7 @@ static PyObject *tachy_backend_name(PyObject *self, PyObject *args)
 
 #ifdef __APPLE__
     return PyUnicode_FromString("coreaudio");
-#elif defined(__linux__)
+#elif defined(__linux__) || defined(_WIN32)
     return PyUnicode_FromString("miniaudio");
 #else
     return PyUnicode_FromString("native-unavailable");
