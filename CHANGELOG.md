@@ -7,6 +7,27 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- Experimental macOS `ScheduledOutputStream` with device-clock sample placement,
+  native deadline failures, cancellation, render timing estimates, and tests
+  under Python contention. See `docs/native-scheduling.md`; physical timing and
+  comparative PsychPortAudio performance have not been validated.
+- A macOS scheduled-playback timing probe with native queue timestamps, raw
+  trial data, and latency/jitter summaries under idle and Python-thread load.
+  See `docs/timing-validation.md`; these measurements are not acoustic onset.
+
+### Fixed
+
+- Prefill finite playback before starting without blocking on clips larger than
+  the ring buffer.
+- Keep macOS output running after drain for stream reuse; include pending
+  AudioQueue buffers in queue statistics and release the GIL during device start.
+- Exclude deliberate idle/draining silence from output underrun counters.
+- Account for a backend-buffer tail when draining Linux/Windows output.
+- Add opt-in silent hardware playback regression tests:
+  `TACHYAUDIO_TEST_HARDWARE=1 python -m unittest discover -s tests`.
+
 ## [0.2.0b2] - 2026-06-19
 
 ### Added

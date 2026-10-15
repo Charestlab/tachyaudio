@@ -205,7 +205,7 @@ class PublicApiTests(unittest.TestCase):
         ta.set_backend(backend)
         stats = ta.play(b"\x00" * 16, channels=1, timeout=0.1)
         self.assertEqual(stats.frames_processed, 4)
-        self.assertEqual(backend.handle.events, ["start", "write", "drain"])
+        self.assertEqual(backend.handle.events, ["write", "drain", "start", "drain"])
 
     def test_output_stream_write_all_handles_partial_writes(self) -> None:
         class OutputHandle:
