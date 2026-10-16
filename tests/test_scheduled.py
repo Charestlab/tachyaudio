@@ -19,12 +19,15 @@ class ScheduledApiTests(unittest.TestCase):
         self.patch.start()
         self.attribute_patch = patch.object(ta, "_native", native, create=True)
         self.attribute_patch.start()
+        self.platform_patch = patch("tachyaudio._scheduled.sys.platform", "darwin")
+        self.platform_patch.start()
         self.stream = ta.ScheduledOutputStream(channels=1)
 
     def tearDown(self) -> None:
         self.stream.close()
         self.attribute_patch.stop()
         self.patch.stop()
+        self.platform_patch.stop()
 
     def test_schedule_submits_data_and_deadline_without_waiting_for_onset(self) -> None:
         target = time.monotonic() + 60

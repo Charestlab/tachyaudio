@@ -1,8 +1,9 @@
-"""Experimental finite-stimulus scheduling against the macOS device clock."""
+"""Experimental finite-stimulus scheduling using native playback timestamps."""
 
 from __future__ import annotations
 
 import math
+import sys
 import time
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
@@ -33,12 +34,16 @@ class ScheduledTiming:
 
 
 class ScheduledOutputStream:
-    """Opt-in macOS scheduler for one finite stimulus at a time.
+    """Opt-in native scheduler for one finite stimulus at a time.
 
     Opens the selected device without changing its rate or buffer configuration.
     Data must match the device's native rate. Mono is duplicated to all output
     channels; otherwise use the device's complete channel count. Timing uses
     Core Audio's output timestamps and still requires external validation.
+    Linux uses direct ALSA, requires an explicit hw: device, and configures its
+    rate/channels with a requested 40 ms buffer. It currently requires hardware
+    float32 or signed-16 support (with native conversion). ALSA status/delay
+    estimates are not verified DAC timestamps.
     """
 
     def __init__(
@@ -56,12 +61,17 @@ class ScheduledOutputStream:
             raise ValueError("minimum_lead_time exceeds the native clock range")
         self.minimum_lead_time = minimum_lead_time
         try:
-            from tachyaudio import _native
+            if sys.platform.startswith("linux"):
+                from tachyaudio import _scheduled_alsa as _native
+            else:
+                from tachyaudio import _native
         except ImportError as error:
-            raise BackendUnavailable("native scheduling requires the macOS extension") from error
+            raise BackendUnavailable(
+                "native scheduling requires a supported compiled extension"
+            ) from error
         factory = getattr(_native, "ScheduledOutputStream", None)
         if factory is None:
-            raise BackendUnavailable("native scheduling is currently implemented only for macOS")
+            raise BackendUnavailable("native scheduling is available only on macOS and Linux")
         self._handle = factory(sample_rate, channels, device_id)
         self._closed = False
 

@@ -4,7 +4,6 @@ import sys
 
 from setuptools import Extension, setup
 
-
 extra_link_args: list[str] = []
 extra_compile_args: list[str] = []
 libraries: list[str] = []
@@ -20,15 +19,24 @@ elif sys.platform == "win32":
     libraries.extend(["ole32", "uuid", "avrt"])
 
 
-setup(
-    ext_modules=[
+extensions = [
         Extension(
             "tachyaudio._native",
             sources=["src/tachyaudio/_native.c"],
-            depends=["src/tachyaudio/_scheduled_coreaudio.h"],
+            depends=["src/tachyaudio/_scheduled_coreaudio.h", "src/tachyaudio/_scheduled_common.h"],
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
             libraries=libraries,
         )
     ]
-)
+
+if sys.platform.startswith("linux"):
+    extensions.append(Extension(
+        "tachyaudio._scheduled_alsa",
+        sources=["src/tachyaudio/_scheduled_alsa.c"],
+        depends=["src/tachyaudio/_scheduled_common.h"],
+        extra_compile_args=["-pthread"],
+        extra_link_args=["-pthread", "-ldl", "-lm"],
+    ))
+
+setup(ext_modules=extensions)

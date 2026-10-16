@@ -9,6 +9,11 @@ public APIs may still change while the backend design stabilizes.
 
 ### Added
 
+- Initial direct ALSA scheduled output with explicit hardware selection,
+  monotonic status/delay estimates, float32/signed-16 hardware formats and
+  simulated-worker tests. Ubuntu hardware validation remains pending; see
+  `docs/ubuntu-scheduling.md`. Windows scheduling remains unavailable.
+
 - Experimental macOS `ScheduledOutputStream` with device-clock sample placement,
   native deadline failures, cancellation, render timing estimates, and tests
   under Python contention. See `docs/native-scheduling.md`; physical timing and

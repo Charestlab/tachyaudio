@@ -1,5 +1,9 @@
 # Native scheduling: experimental macOS implementation
 
+An initial Linux ALSA implementation now uses the same public API. See
+[Ubuntu handoff](ubuntu-scheduling.md) for its different timing basis and pending
+hardware validation. Windows scheduled output remains unimplemented.
+
 The objective is to match and, if independent measurements support it, surpass
 PsychPortAudio's timing performance. No superiority or physical-onset accuracy
 claim has been established. The existing `OutputStream` and default tachypy
