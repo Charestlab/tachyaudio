@@ -38,7 +38,7 @@ Preserve local edits before switching branches:
 
 ```sh
 git fetch origin
-git switch codex/native-scheduling
+git switch dev_0.2.0b3
 git pull --ff-only
 python3 -m venv .venv
 . .venv/bin/activate
