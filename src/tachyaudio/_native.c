@@ -186,6 +186,7 @@ static PyObject *tachy_build_stream_stats_without_hardware_latency(
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreAudio/CoreAudio.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <mach/mach_time.h>
 #endif
 
 #ifdef __APPLE__
@@ -193,12 +194,20 @@ static PyObject *tachy_build_stream_stats_without_hardware_latency(
 typedef struct {
     PyObject_HEAD
     AudioQueueRef queue;
+    int starting;
     AudioQueueBufferRef buffers[TACHY_OUTPUT_BUFFER_COUNT];
     AudioStreamBasicDescription format;
     UInt32 bytes_per_frame;
     UInt32 buffer_byte_size;
     UInt64 frames_processed;
     UInt32 pending_buffers;
+    size_t pending_audio_bytes;
+    mach_timebase_info_data_t clock_timebase;
+    UInt64 data_buffer_count;
+    UInt64 last_data_copy_ns;
+    UInt64 last_enqueue_begin_ns;
+    UInt64 last_enqueue_end_ns;
+    UInt64 last_data_complete_ns;
     UInt32 underruns;
     UInt32 overruns;
     double hardware_latency;
@@ -291,16 +300,30 @@ static size_t tachy_ring_copy_out(TachyOutputStream *stream, uint8_t *target, si
         byte_count);
 }
 
+static UInt64 tachy_output_clock_ns(TachyOutputStream *stream)
+{
+    UInt64 ticks = mach_absolute_time();
+    return (ticks / stream->clock_timebase.denom) * stream->clock_timebase.numer +
+        ((ticks % stream->clock_timebase.denom) * stream->clock_timebase.numer) /
+        stream->clock_timebase.denom;
+}
+
 static void tachy_fill_output_buffer(TachyOutputStream *stream, AudioQueueBufferRef buffer)
 {
     tachy_mutex_lock(&stream->lock);
     size_t copied = tachy_ring_copy_out(stream, (uint8_t *)buffer->mAudioData, stream->buffer_byte_size);
+    if (copied > 0) {
+        stream->last_data_copy_ns = tachy_output_clock_ns(stream);
+    }
     if (copied < stream->buffer_byte_size) {
         memset((uint8_t *)buffer->mAudioData + copied, 0, stream->buffer_byte_size - copied);
-        if (!(stream->draining && copied > 0)) {
+        if (!stream->draining) {
             stream->underruns += 1;
         }
     }
+    buffer->mUserData = (void *)(uintptr_t)copied;
+    stream->pending_audio_bytes += copied;
+    stream->pending_buffers += 1;
     stream->frames_processed += stream->buffer_byte_size / stream->bytes_per_frame;
     tachy_mutex_unlock(&stream->lock);
 
@@ -311,14 +334,30 @@ static int tachy_enqueue_output_buffer(TachyOutputStream *stream, AudioQueueBuff
 {
     tachy_fill_output_buffer(stream, buffer);
 
+    size_t data_bytes = (size_t)(uintptr_t)buffer->mUserData;
+    UInt64 enqueue_begin_ns = data_bytes > 0 ? tachy_output_clock_ns(stream) : 0;
     OSStatus status = AudioQueueEnqueueBuffer(stream->queue, buffer, 0, NULL);
+    UInt64 enqueue_end_ns = data_bytes > 0 ? tachy_output_clock_ns(stream) : 0;
     if (status != noErr) {
+        tachy_mutex_lock(&stream->lock);
+        if (stream->pending_buffers > 0) {
+            stream->pending_buffers -= 1;
+        }
+        size_t rejected = (size_t)(uintptr_t)buffer->mUserData;
+        if (rejected <= stream->pending_audio_bytes) {
+            stream->pending_audio_bytes -= rejected;
+        }
+        buffer->mUserData = NULL;
+        tachy_mutex_unlock(&stream->lock);
         return 0;
     }
-
-    tachy_mutex_lock(&stream->lock);
-    stream->pending_buffers += 1;
-    tachy_mutex_unlock(&stream->lock);
+    if (data_bytes > 0) {
+        tachy_mutex_lock(&stream->lock);
+        stream->data_buffer_count += 1;
+        stream->last_enqueue_begin_ns = enqueue_begin_ns;
+        stream->last_enqueue_end_ns = enqueue_end_ns;
+        tachy_mutex_unlock(&stream->lock);
+    }
     return 1;
 }
 
@@ -331,11 +370,15 @@ static void tachy_output_callback(void *user_data, AudioQueueRef queue, AudioQue
     if (stream->pending_buffers > 0) {
         stream->pending_buffers -= 1;
     }
-    int should_continue = stream->started && !stream->closed;
-    if (should_continue && stream->draining && stream->ring_size == 0) {
-        stream->started = 0;
-        should_continue = 0;
+    size_t completed = (size_t)(uintptr_t)buffer->mUserData;
+    if (completed > 0) {
+        stream->last_data_complete_ns = tachy_output_clock_ns(stream);
     }
+    if (completed <= stream->pending_audio_bytes) {
+        stream->pending_audio_bytes -= completed;
+    }
+    buffer->mUserData = NULL;
+    int should_continue = stream->started && !stream->closed;
     tachy_mutex_unlock(&stream->lock);
 
     if (should_continue) {
@@ -445,6 +488,8 @@ static PyObject *tachy_output_new(PyTypeObject *type, PyObject *args, PyObject *
     self->buffer_byte_size = buffer_frames * self->bytes_per_frame;
     self->frames_processed = 0;
     self->pending_buffers = 0;
+    self->pending_audio_bytes = 0;
+    mach_timebase_info(&self->clock_timebase);
     self->underruns = 0;
     self->overruns = 0;
     self->hardware_latency = 0.0;
@@ -558,6 +603,10 @@ static void tachy_output_dealloc(TachyOutputStream *self)
 
 static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
+    if (self->starting) {
+        PyErr_SetString(PyExc_RuntimeError, "output stream is starting");
+        return NULL;
+    }
     if (self->closed || self->queue == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "output stream is closed");
         return NULL;
@@ -570,7 +619,8 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
     tachy_mutex_lock(&self->lock);
     self->started = 1;
     self->pending_buffers = 0;
-    self->draining = 0;
+    self->pending_audio_bytes = 0;
+    self->draining = self->draining || self->ring_size == 0;
     tachy_mutex_unlock(&self->lock);
 
     for (UInt32 index = 0; index < TACHY_OUTPUT_BUFFER_COUNT; index++) {
@@ -583,7 +633,12 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
         }
     }
 
-    OSStatus status = AudioQueueStart(self->queue, NULL);
+    self->starting = 1;
+    OSStatus status;
+    Py_BEGIN_ALLOW_THREADS
+    status = AudioQueueStart(self->queue, NULL);
+    Py_END_ALLOW_THREADS
+    self->starting = 0;
     if (status != noErr) {
         tachy_mutex_lock(&self->lock);
         self->started = 0;
@@ -597,6 +652,10 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
 
 static PyObject *tachy_output_stop(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
+    if (self->starting) {
+        PyErr_SetString(PyExc_RuntimeError, "output stream is starting");
+        return NULL;
+    }
     if (self->closed || self->queue == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "output stream is closed");
         return NULL;
@@ -639,7 +698,7 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
     for (;;) {
         tachy_mutex_lock(&self->lock);
         self->draining = 1;
-        int empty = self->ring_size == 0 && self->pending_buffers == 0;
+        int empty = self->ring_size == 0 && self->pending_audio_bytes == 0;
         tachy_mutex_unlock(&self->lock);
 
         if (empty) {
@@ -681,6 +740,10 @@ static PyObject *tachy_output_flush(TachyOutputStream *self, PyObject *Py_UNUSED
 
 static PyObject *tachy_output_close(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
 {
+    if (self->starting) {
+        PyErr_SetString(PyExc_RuntimeError, "output stream is starting");
+        return NULL;
+    }
     if (!self->closed && self->queue != NULL) {
         tachy_mutex_lock(&self->lock);
         self->closed = 1;
@@ -742,7 +805,8 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
     UInt32 buffer_size = 0;
     double estimated_latency = 0.0;
     if (self->format.mSampleRate > 0 && self->bytes_per_frame > 0) {
-        queued_frames = (UInt64)(self->ring_size / self->bytes_per_frame);
+        queued_frames = (UInt64)(self->ring_size / self->bytes_per_frame) +
+            (UInt64)self->pending_buffers * self->buffer_byte_size / self->bytes_per_frame;
         buffer_size = self->buffer_byte_size / self->bytes_per_frame;
         estimated_latency = (double)queued_frames / self->format.mSampleRate;
     }
@@ -760,7 +824,27 @@ static PyObject *tachy_output_stats(TachyOutputStream *self, PyObject *Py_UNUSED
         buffer_size);
 }
 
+static PyObject *tachy_output_timing(TachyOutputStream *self, PyObject *Py_UNUSED(ignored))
+{
+    tachy_mutex_lock(&self->lock);
+    UInt64 data_buffer_count = self->data_buffer_count;
+    UInt64 copied_ns = self->last_data_copy_ns;
+    UInt64 enqueue_begin_ns = self->last_enqueue_begin_ns;
+    UInt64 enqueue_end_ns = self->last_enqueue_end_ns;
+    UInt64 completed_ns = self->last_data_complete_ns;
+    tachy_mutex_unlock(&self->lock);
+    return Py_BuildValue(
+        "{s:K,s:K,s:K,s:K,s:K,s:K}",
+        "clock_now_ns", tachy_output_clock_ns(self),
+        "data_buffer_count", data_buffer_count,
+        "data_copy_ns", copied_ns,
+        "enqueue_begin_ns", enqueue_begin_ns,
+        "enqueue_end_ns", enqueue_end_ns,
+        "data_complete_ns", completed_ns);
+}
+
 static PyMethodDef tachy_output_methods[] = {
+    {"_timing", (PyCFunction)tachy_output_timing, METH_NOARGS, "Private macOS queue timing diagnostics."},
     {"start", (PyCFunction)tachy_output_start, METH_NOARGS, "Start output playback."},
     {"stop", (PyCFunction)tachy_output_stop, METH_NOARGS, "Stop output playback."},
     {"drain", (PyCFunction)tachy_output_drain, METH_VARARGS | METH_KEYWORDS, "Wait for queued frames to drain."},
@@ -1270,6 +1354,10 @@ static void tachy_duplex_dealloc(TachyDuplexStream *self)
 
 static PyObject *tachy_duplex_start(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
 {
+    if (self->output != NULL && self->output->starting) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is starting");
+        return NULL;
+    }
     if (self->closed || self->input == NULL || self->output == NULL) {
         PyErr_SetString(PyExc_RuntimeError, "duplex stream is closed");
         return NULL;
@@ -1334,6 +1422,10 @@ static PyObject *tachy_duplex_flush(TachyDuplexStream *self, PyObject *Py_UNUSED
 
 static PyObject *tachy_duplex_close(TachyDuplexStream *self, PyObject *Py_UNUSED(ignored))
 {
+    if (self->output != NULL && self->output->starting) {
+        PyErr_SetString(PyExc_RuntimeError, "duplex stream is starting");
+        return NULL;
+    }
     if (!self->closed) {
         self->closed = 1;
         if (self->output != NULL) {
@@ -1713,6 +1805,8 @@ typedef struct {
     ma_uint32 buffer_frames;
     ma_uint32 bytes_per_frame;
     ma_uint64 frames_processed;
+    ma_uint64 output_tail_frames;
+    int draining;
     ma_uint32 underruns;
     ma_uint32 overruns;
     uint8_t *ring;
@@ -1837,10 +1931,24 @@ static void tachy_miniaudio_output_callback(
     size_t byte_count = (size_t)frame_count * stream->bytes_per_frame;
 
     tachy_mutex_lock(&stream->lock);
+    if (stream->output_tail_frames > frame_count) {
+        stream->output_tail_frames -= frame_count;
+    } else {
+        stream->output_tail_frames = 0;
+    }
     size_t copied = tachy_miniaudio_ring_copy_out(stream, (uint8_t *)output, byte_count);
+    if (copied > 0) {
+        ma_uint64 device_frames = (ma_uint64)device->playback.internalPeriodSizeInFrames *
+            device->playback.internalPeriods;
+        ma_uint32 device_rate = device->playback.internalSampleRate;
+        stream->output_tail_frames = frame_count + (device_rate > 0 ?
+            (device_frames * stream->sample_rate + device_rate - 1) / device_rate : frame_count);
+    }
     if (copied < byte_count) {
         memset((uint8_t *)output + copied, 0, byte_count - copied);
-        stream->underruns += 1;
+        if (!stream->draining) {
+            stream->underruns += 1;
+        }
     }
     stream->frames_processed += frame_count;
     tachy_mutex_unlock(&stream->lock);
@@ -2055,6 +2163,10 @@ static PyObject *tachy_output_start(TachyOutputStream *self, PyObject *Py_UNUSED
         Py_RETURN_NONE;
     }
 
+    tachy_mutex_lock(&self->lock);
+    self->draining = self->draining || self->ring_size == 0;
+    self->output_tail_frames = 0;
+    tachy_mutex_unlock(&self->lock);
     ma_result result = ma_device_start(&self->device);
     if (result != MA_SUCCESS) {
         PyErr_SetString(PyExc_RuntimeError, "failed to start miniaudio output device");
@@ -2103,7 +2215,8 @@ static PyObject *tachy_output_drain(TachyOutputStream *self, PyObject *args, PyO
 
     for (;;) {
         tachy_mutex_lock(&self->lock);
-        int empty = self->ring_size == 0;
+        self->draining = 1;
+        int empty = self->ring_size == 0 && self->output_tail_frames == 0;
         tachy_mutex_unlock(&self->lock);
 
         if (empty) {
@@ -2186,6 +2299,7 @@ static PyObject *tachy_output_write(TachyOutputStream *self, PyObject *frames)
         self->overruns += 1;
     }
     if (accepted > 0) {
+        self->draining = 0;
         tachy_miniaudio_ring_copy_in(self, (const uint8_t *)view.buf, accepted);
     }
     tachy_mutex_unlock(&self->lock);
@@ -3498,6 +3612,10 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
 
 #endif
 
+#ifdef __APPLE__
+#include "_scheduled_coreaudio.h"
+#endif
+
 static PyObject *tachy_backend_name(PyObject *self, PyObject *args)
 {
     (void)self;
@@ -3513,6 +3631,9 @@ static PyObject *tachy_backend_name(PyObject *self, PyObject *args)
 }
 
 static PyMethodDef tachy_methods[] = {
+#ifdef __APPLE__
+    {"_scheduled_render_test", tachy_scheduled_render_test, METH_VARARGS, "Exercise the native renderer without a device."},
+#endif
     {"backend_name", tachy_backend_name, METH_NOARGS, "Return the active native backend name."},
     {"list_devices", tachy_list_devices, METH_NOARGS, "List native audio devices."},
     {NULL, NULL, 0, NULL}
@@ -3530,6 +3651,11 @@ PyMODINIT_FUNC PyInit__native(void)
 {
     PyObject *module = NULL;
 
+#ifdef __APPLE__
+    if (PyType_Ready(&TachyScheduledOutputType) < 0) {
+        return NULL;
+    }
+#endif
     if (PyType_Ready(&TachyOutputStreamType) < 0) {
         return NULL;
     }
@@ -3566,5 +3692,13 @@ PyMODINIT_FUNC PyInit__native(void)
         return NULL;
     }
 
+#ifdef __APPLE__
+    Py_INCREF(&TachyScheduledOutputType);
+    if (PyModule_AddObject(module, "ScheduledOutputStream", (PyObject *)&TachyScheduledOutputType) < 0) {
+        Py_DECREF(&TachyScheduledOutputType);
+        Py_DECREF(module);
+        return NULL;
+    }
+#endif
     return module;
 }

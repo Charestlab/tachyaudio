@@ -22,13 +22,31 @@ queue buffers fed by a native ring buffer. A future cross-platform
 implementation can move to vendored `miniaudio` once the desired callback,
 buffering, and drain semantics are clearer.
 
-Finite playback uses an explicit drain mode: partial final buffers are padded
-with silence without counting as underruns, and callbacks stop refilling once
-queued audio has drained.
+Finite playback uses an explicit drain mode: partial final buffers and idle
+callbacks are filled with silence without counting as underruns after drain is
+requested. The engine stays running after `drain()` so subsequent clips do not
+pay another device-start cost. Starting an empty stream also enters idle mode;
+writing more data resumes underrun detection.
+
+On macOS, drain waits for callbacks to return buffers containing user audio.
+Linux/Windows wait for the ring and a conservative tail based on the backend's
+period sizes. Neither is an acoustic completion timestamp. A running empty
+stream still has device buffering latency; reuse removes setup overhead, not
+that latency. Call `close()` to release the device when finished.
+
+The `play()` helper prefills with one nonblocking `write()` before starting,
+then streams the remainder. Never call `write_all()` with an arbitrary long
+clip before starting: a full ring cannot make progress without playback.
 
 Stream lifecycle methods have distinct responsibilities: `stop()` halts playback,
 `drain()` waits for queued audio to finish, `flush()` discards queued ring-buffer
 audio, and `close()` releases native resources.
+
+Creating `OutputStream(...)` opens the device and allocates its buffers.
+`stream.start()` starts the audio engine, even if it only has silence to output;
+it does not mean a stimulus has audibly begun. At the experiment layer,
+`tachypy.Audio.prepare()` opens and warms an idle stream, and `Audio.play()`
+submits a stimulus. Physical onset requires independent timing measurement.
 
 Input capture mirrors output buffering in reverse: Core Audio callbacks write
 captured float32 frames into a native ring buffer, and Python reads available
@@ -47,7 +65,9 @@ Audio queues inside one native stream object. The Linux miniaudio implementation
 uses one native duplex device callback.
 
 Stream statistics distinguish queue state from hardware behavior. `queued_frames`
-and `queued_latency` describe the native ring buffer. `hardware_latency`
+and `queued_latency` describe the native ring buffer; macOS output also includes
+AudioQueue buffers (including queued silence), conservatively counting each
+pending buffer in full. `hardware_latency`
 describes backend-reported device latency when available. `buffer_size`
 describes the callback buffer size in frames. `estimated_latency` reports
 `queued_latency + hardware_latency` when hardware latency is available, otherwise

@@ -3,6 +3,7 @@
 from tachyaudio._backend import get_backend, list_devices, set_backend
 from tachyaudio._device import DeviceInfo, DeviceKind
 from tachyaudio._errors import BackendUnavailable, StreamClosed, TachyAudioError
+from tachyaudio._scheduled import ScheduledOutputStream, ScheduledTiming, SchedulingError
 from tachyaudio._stream import (
     DuplexStream,
     DuplexStreamConfig,
@@ -24,6 +25,9 @@ __all__ = [
     "DuplexStreamStats",
     "InputStream",
     "OutputStream",
+    "ScheduledOutputStream",
+    "ScheduledTiming",
+    "SchedulingError",
     "StreamClosed",
     "StreamConfig",
     "StreamStats",
