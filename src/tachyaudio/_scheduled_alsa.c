@@ -2,10 +2,22 @@
 #include <Python.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include "_scheduled_common.h"
+
+/* ALSA snd_pcm_format_t values used for format negotiation, best precision first. */
+#define TACHY_ALSA_FORMAT_FLOAT_LE 14
+#define TACHY_ALSA_FORMAT_S32_LE 10
+#define TACHY_ALSA_FORMAT_S16_LE 2
+
+enum {
+    TACHY_ALSA_SAMPLE_FLOAT32 = 0,
+    TACHY_ALSA_SAMPLE_S32,
+    TACHY_ALSA_SAMPLE_S16
+};
 
 #ifndef TACHY_ALSA_LIBRARY
 #define TACHY_ALSA_LIBRARY "libasound.so.2"
@@ -42,11 +54,11 @@ typedef struct {
     AlsaApi api;
     pthread_t thread;
     pthread_mutex_t lock;
-    int lock_ready, running, stopping, closed, fault, state, integer_format;
+    int lock_ready, running, stopping, closed, fault, state, sample_format, rt_priority_active;
     unsigned int rate, channels;
     unsigned long capacity, period;
     float *samples, *output;
-    int16_t *integer_output;
+    void *integer_output;
     size_t frames, position;
     uint64_t requested, onset, callback, complete, end, callbacks, beginning;
 } AlsaScheduled;
@@ -128,10 +140,19 @@ static void *alsa_worker(void *context)
                 }
             }
             const void *output = self->output;
-            if (self->integer_format) {
+            if (self->sample_format == TACHY_ALSA_SAMPLE_S32) {
+                int32_t *destination = (int32_t *)self->integer_output;
                 for (size_t index = 0; index < self->period * self->channels; index++) {
                     float value = self->output[index];
-                    self->integer_output[index] = value >= (32767.0f / 32768.0f) ? INT16_MAX :
+                    destination[index] = value >= (2147483647.0f / 2147483648.0f) ? INT32_MAX :
+                        value <= -1 ? INT32_MIN : (int32_t)llrint((double)value * 2147483648.0);
+                }
+                output = self->integer_output;
+            } else if (self->sample_format == TACHY_ALSA_SAMPLE_S16) {
+                int16_t *destination = (int16_t *)self->integer_output;
+                for (size_t index = 0; index < self->period * self->channels; index++) {
+                    float value = self->output[index];
+                    destination[index] = value >= (32767.0f / 32768.0f) ? INT16_MAX :
                         value <= -1 ? INT16_MIN : (int16_t)lrintf(value * 32768.0f);
                 }
                 output = self->integer_output;
@@ -237,9 +258,13 @@ static PyObject *alsa_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     LOAD_ALSA(status_get_htstamp);
 #undef LOAD_ALSA
     if (self->api.open(&self->pcm, device, 0, 1) < 0) goto failure;
-    if (self->api.set_params(self->pcm, 14, 3, channels, rate, 0, 40000) < 0) {
-        self->integer_format = 1;
-        if (self->api.set_params(self->pcm, 2, 3, channels, rate, 0, 40000) < 0) goto failure;
+    self->sample_format = TACHY_ALSA_SAMPLE_FLOAT32;
+    if (self->api.set_params(self->pcm, TACHY_ALSA_FORMAT_FLOAT_LE, 3, channels, rate, 0, 40000) < 0) {
+        self->sample_format = TACHY_ALSA_SAMPLE_S32;
+        if (self->api.set_params(self->pcm, TACHY_ALSA_FORMAT_S32_LE, 3, channels, rate, 0, 40000) < 0) {
+            self->sample_format = TACHY_ALSA_SAMPLE_S16;
+            if (self->api.set_params(self->pcm, TACHY_ALSA_FORMAT_S16_LE, 3, channels, rate, 0, 40000) < 0) goto failure;
+        }
     }
     if (self->api.get_params(self->pcm, &self->capacity, &self->period) < 0 ||
         self->period == 0 || self->capacity < self->period * 2 || self->capacity > (unsigned long)rate) goto failure;
@@ -254,13 +279,16 @@ static PyObject *alsa_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     if (result < 0 || self->api.status_malloc(&self->snapshot) < 0) goto failure;
     self->output = PyMem_RawCalloc(self->capacity * channels, sizeof(float));
     if (!self->output) goto failure;
-    if (self->integer_format) {
+    if (self->sample_format == TACHY_ALSA_SAMPLE_S32) {
+        self->integer_output = PyMem_RawCalloc(self->capacity * channels, sizeof(int32_t));
+        if (!self->integer_output) goto failure;
+    } else if (self->sample_format == TACHY_ALSA_SAMPLE_S16) {
         self->integer_output = PyMem_RawCalloc(self->capacity * channels, sizeof(int16_t));
         if (!self->integer_output) goto failure;
     }
     return (PyObject *)self;
 failure:
-    PyErr_SetString(PyExc_RuntimeError, "ALSA scheduler setup failed: requires libasound.so.2, available hw: device, float32 or signed-16 interleaved format at exact requested rate/channels, and monotonic timestamps");
+    PyErr_SetString(PyExc_RuntimeError, "ALSA scheduler setup failed: requires libasound.so.2, available hw: device, float32/signed-32/signed-16 interleaved format at exact requested rate/channels, and monotonic timestamps");
     Py_DECREF(self);
     return NULL;
 }
@@ -277,11 +305,14 @@ static PyObject *alsa_start(AlsaScheduled *self, PyObject *ignored)
     }
     if (self->running) Py_RETURN_NONE;
     memset(self->output, 0, self->capacity * self->channels * sizeof(float));
-    if (self->integer_format)
+    if (self->sample_format == TACHY_ALSA_SAMPLE_S32)
+        memset(self->integer_output, 0, self->capacity * self->channels * sizeof(int32_t));
+    else if (self->sample_format == TACHY_ALSA_SAMPLE_S16)
         memset(self->integer_output, 0, self->capacity * self->channels * sizeof(int16_t));
+    void *primer = self->sample_format == TACHY_ALSA_SAMPLE_FLOAT32 ?
+        (void *)self->output : self->integer_output;
     if (self->api.prepare(self->pcm) < 0 ||
-        self->api.writei(self->pcm, self->integer_format ? (void *)self->integer_output :
-                         (void *)self->output, self->capacity) != (long)self->capacity) {
+        self->api.writei(self->pcm, primer, self->capacity) != (long)self->capacity) {
         self->fault = 1;
         PyErr_SetString(PyExc_RuntimeError, "could not prime ALSA with silence");
         return NULL;
@@ -292,6 +323,19 @@ static PyObject *alsa_start(AlsaScheduled *self, PyObject *ignored)
         return NULL;
     }
     self->running = 1;
+    /* Best-effort real-time scheduling for the render worker, matching the
+     * protection PsychPortAudio/PipeWire's rtkit path give their audio
+     * threads. Without CAP_SYS_NICE or an RLIMIT_RTPRIO grant this fails
+     * harmlessly and the worker keeps running at the normal priority. */
+    struct sched_param rt_param;
+    memset(&rt_param, 0, sizeof(rt_param));
+    int max_priority = sched_get_priority_max(SCHED_FIFO);
+    if (max_priority >= 0) {
+        rt_param.sched_priority = max_priority > 10 ? max_priority - 10 : max_priority;
+        self->rt_priority_active = pthread_setschedparam(self->thread, SCHED_FIFO, &rt_param) == 0;
+    } else {
+        self->rt_priority_active = 0;
+    }
     Py_RETURN_NONE;
 }
 
@@ -350,8 +394,11 @@ static PyObject *alsa_status(AlsaScheduled *self, PyObject *ignored)
     uint64_t requested = self->requested, onset = self->onset, callback = self->callback;
     uint64_t complete = self->complete, end = self->end, frames = self->position;
     uint64_t callbacks = self->callbacks, beginning = self->beginning;
+    int rt_priority_active = self->rt_priority_active;
     pthread_mutex_unlock(&self->lock);
-    return Py_BuildValue("{s:i,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:k,s:I,s:s,s:s}",
+    const char *device_format = self->sample_format == TACHY_ALSA_SAMPLE_S32 ? "s32_le" :
+        self->sample_format == TACHY_ALSA_SAMPLE_S16 ? "s16_le" : "float32_le";
+    return Py_BuildValue("{s:i,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:K,s:k,s:I,s:s,s:s,s:i}",
         "state", state, "requested_ns", (unsigned long long)requested,
         "predicted_onset_ns", (unsigned long long)onset,
         "render_callback_ns", (unsigned long long)callback,
@@ -362,7 +409,8 @@ static PyObject *alsa_status(AlsaScheduled *self, PyObject *ignored)
         "decision_buffer_ns", (unsigned long long)beginning,
         "buffer_frames", self->capacity, "sample_rate", self->rate,
         "clock_source", "alsa-monotonic-status-delay",
-        "device_format", self->integer_format ? "s16_le" : "float32_le");
+        "device_format", device_format,
+        "rt_priority", rt_priority_active);
 }
 
 static PyObject *alsa_cancel(AlsaScheduled *self, PyObject *ignored)

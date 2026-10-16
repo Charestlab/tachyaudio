@@ -34,7 +34,8 @@ int snd_pcm_set_params(void *pcm, int format, int access, unsigned int channels,
                        unsigned int rate, int resample, unsigned int latency)
 {
     (void)access; (void)channels; (void)resample; (void)latency;
-    if (getenv("TACHY_FAKE_S16") && format == 14) return -1;
+    if (getenv("TACHY_FAKE_S16") && (format == 14 || format == 10)) return -1;
+    if (getenv("TACHY_FAKE_S32") && format == 14) return -1;
     ((FakePcm *)pcm)->rate = rate;
     return 0;
 }

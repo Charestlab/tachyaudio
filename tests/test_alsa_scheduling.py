@@ -113,6 +113,15 @@ class AlsaWorkerTests(unittest.TestCase):
             stream = self.open()
             self.assertEqual(stream.status()["device_format"], "s16_le")
 
+    def test_s32_format_negotiation(self):
+        with patch.dict(os.environ, {"TACHY_FAKE_S32": "1"}):
+            stream = self.open()
+            self.assertEqual(stream.status()["device_format"], "s32_le")
+
+    def test_rt_priority_flag_is_present(self):
+        stream = self.open()
+        self.assertIn(stream.status()["rt_priority"], (0, 1))
+
     def test_explicit_device_required(self):
         for device in (None, "default", "pulse", "plughw:0,0"):
             with self.subTest(device=device), self.assertRaises(ValueError):

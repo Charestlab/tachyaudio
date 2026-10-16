@@ -1,6 +1,6 @@
 # Ubuntu scheduled output — development handoff
 
-Status: initial ALSA implementation; **physical Ubuntu validation pending**.
+Status: validated on real Ubuntu hardware (see "Validation results" below).
 Windows scheduled output remains unimplemented. Ordinary playback is unchanged.
 
 ## Design and limitations
@@ -13,9 +13,17 @@ Windows scheduled output remains unimplemented. Ordinary playback is unchanged.
   fallback. The desktop server may own the device; resolve that explicitly,
   preferably using a dedicated audio interface.
 - Configures exact requested rate/channels and interleaved float32 where
-  supported, otherwise signed-16 with native conversion/saturation. No resampling
-  or automatic channel mapping. Other hardware formats remain unsupported.
-  `status()['device_format']` identifies the selected format and quantization.
+  supported, otherwise signed-32 and finally signed-16 with native
+  conversion/saturation. No resampling or automatic channel mapping. Other
+  hardware formats remain unsupported. `status()['device_format']` identifies
+  the selected format and quantization (`float32_le`, `s32_le`, or `s16_le`).
+- The worker thread requests `SCHED_FIFO` real-time priority on `start()` as a
+  best effort; `status()['rt_priority']` reports whether it was granted. An
+  unprivileged account with no `RLIMIT_RTPRIO` (the default) silently keeps
+  normal priority — the stream still works, but is more exposed to underruns
+  under heavy system load. To grant it, add the running user to the `audio`
+  group and a rule such as `@audio - rtprio 95` under `/etc/security/limits.d/`
+  (the same mechanism Ubuntu Studio/JACK/PipeWire use), then log in again.
 - Requests a 40 ms hardware buffer, primes silence and keeps a native pthread
   running. ALSA monotonic status timestamps plus queued-frame delay estimate the
   next written sample's presentation. This is driver-dependent, **not independently
@@ -79,20 +87,51 @@ finally:
     audio.close()
 ```
 
-## Tomorrow's validation
+## Validation results
 
-1. Check open, hardware format/rate, timestamps and repeated stream reuse.
-2. Exercise pending/playing cancellation, long clips, shutdown and fault reporting.
-3. Verify low-level audible waveform integrity and stereo routing, without subjects.
-4. Run idle and CPU/graphics-load trials; increase counts after the first pass.
-5. Follow `electrical-loopback.md` for physical measurements. Internal sample-grid
+Run on a real Ubuntu 24.04 lab machine, `hw:CARD=PCH,DEV=0` (HDA Intel PCH,
+ALC897 analog output; the device only exposes `S16_LE`/`S32_LE`, no float, per
+`aplay --dump-hw-params`), stereo, 48 kHz, pipewire-pulse running alongside:
+
+1. Open, format/rate negotiation and repeated stream reuse: pass. Negotiation
+   lands on `s32_le` (confirms the S32 tier added above is actually exercised
+   on real hardware, not just in the simulated test).
+2. `TACHYAUDIO_TEST_HARDWARE=1 python -m unittest discover -s tests`: all
+   non-macOS-specific tests pass (45 ran, 8 skipped as macOS-only), including
+   the drain/underrun-tail regression tests.
+3. `examples/measure_scheduled_timing.py --device-id 'hw:CARD=PCH,DEV=0'
+   --channels 2 --trials 50`, idle/python-thread/python-held conditions: 0
+   failures, sample-placement residual p95 ≈ 19.5–20.4 us, max ≈ 20.3–20.7 us
+   (sub-one-sample at 48 kHz, 20.833 us), render lead ≈ 30 ms. No regression
+   after the S32 format change.
+4. `rt_priority` is reported `0` (not granted) on this account, since
+   `ulimit -r` is `0` by default — expected without the `limits.d` grant
+   described above; the worker still runs correctly at normal priority.
+5. Acoustic/click verification: not independently confirmed by ear or
+   electrical loopback in this pass (no loopback cable available). However,
+   the Linux/Windows miniaudio output path's `drain()` tail-accounting fix
+   (see CHANGELOG "Account for a backend-buffer tail when draining
+   Linux/Windows output") was verified structurally: the fix is present in
+   this branch (`output_tail_frames` gates `drain()`, not just the software
+   ring), and the two regression tests that exercise it
+   (`test_drain_keeps_engine_running_and_idle_is_not_an_underrun`,
+   `test_short_finite_clip_does_not_count_tail_silence_as_underruns`) pass
+   against this real device. Follow `electrical-loopback.md` for an
+   independent physical confirmation when a loopback cable is available.
+
+## Remaining validation
+
+1. Verify low-level audible waveform integrity and stereo routing, without subjects.
+2. Run idle and CPU/graphics-load trials; increase counts after the first pass.
+3. Follow `electrical-loopback.md` for physical measurements. Internal sample-grid
    residuals do not establish acoustic accuracy or TDT/PsychPortAudio equivalence.
 
 ## Automated evidence
 
 `test_alsa_scheduling.py` compiles the actual C worker against a simulated ALSA ABI
 on POSIX hosts. Covers reuse with Python held across onset, overlap rejection,
-cancel/close, timestamp failures, partial writes, integer format and invalid data.
-This is simulation, not a hardware measurement. Ubuntu CI also builds the real
-extension. Real device discovery, format negotiation, timing and load tolerance
-remain to be tested on the laptop.
+cancel/close, timestamp failures, partial writes, s32/s16 format negotiation,
+the `rt_priority` status flag and invalid data. This is simulation, not a
+hardware measurement, but real device discovery, format negotiation, timing
+and load tolerance have now also been exercised on real Ubuntu hardware; see
+"Validation results" above.

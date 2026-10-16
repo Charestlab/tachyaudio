@@ -13,7 +13,20 @@ public APIs may still change while the backend design stabilizes.
   monotonic status/delay estimates, float32/signed-16 hardware formats and
   simulated-worker tests. Ubuntu hardware validation remains pending; see
   `docs/ubuntu-scheduling.md`. Windows scheduling remains unavailable.
-
+- Linux ALSA `ScheduledOutputStream` now negotiates signed-32-bit interleaved
+  output as an intermediate precision tier between float32 and signed-16,
+  matching common HDA/Realtek codecs that reject float32 but support 32-bit
+  containers. Confirmed on real Ubuntu hardware (`hw:CARD=PCH,DEV=0`, ALC897):
+  negotiation now lands on `s32_le` instead of falling all the way back to
+  `s16_le`. `status()['device_format']` reports which tier was selected.
+- The ALSA scheduling worker thread now makes a best-effort request for
+  `SCHED_FIFO` real-time priority on start, mirroring the protection
+  PsychPortAudio and PipeWire's rtkit-managed threads get against underruns
+  under system load. Without `CAP_SYS_NICE` or an `RLIMIT_RTPRIO` grant (the
+  default for an unprivileged user) this fails harmlessly and the worker
+  keeps running at normal priority; `status()['rt_priority']` reports whether
+  elevation succeeded. See `docs/ubuntu-scheduling.md` for the recommended
+  `limits.conf` grant to enable it on a lab machine.
 - Experimental macOS `ScheduledOutputStream` with device-clock sample placement,
   native deadline failures, cancellation, render timing estimates, and tests
   under Python contention. See `docs/native-scheduling.md`; physical timing and
