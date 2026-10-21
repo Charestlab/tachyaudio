@@ -7,6 +7,31 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+### Changed
+
+- Linux automatic buffer with real-time priority is now 2 ms on PCI cards
+  (onboard HDA) and stays 5 ms on USB and other buses, detected from sysfs.
+  `lead_time` on the onboard ALC897 drops from 8.25 to 4.5 ms: 300/300 stimuli
+  at 48 and 192 kHz, idle and with every core busy (USB faults at 2 ms). See
+  `docs/linux-scheduling.md`.
+- CI: actions moved to Node 24 releases (checkout/setup-python/upload-artifact
+  v6), tests run with `-X faulthandler`, jobs have timeouts, superseded runs
+  are cancelled and workflows get read-only permissions.
+
+### Fixed
+
+- `close()` from another thread while `start()` was promoting the ALSA worker
+  could join the thread whose handle `start()` was still using (crash or hang
+  in a close-during-start stress test; now waits for `start()` to finish).
+- `schedule()` raises `SchedulingError` for insufficient advance notice in all
+  cases; a deadline that passed the Python check but not the native re-check
+  after copying used to raise `ValueError`.
+- Intermittent segfault of the test suite on CI: the simulated ALSA library
+  read `TACHY_FAKE_*` environment variables from the worker thread while tests
+  restored `os.environ`. Tests now configure it through a C hook, and timing
+  tests are re-run when the simulated worker was demonstrably starved by the
+  host (shared CI machines), failing otherwise with the longest worker gap.
+
 ### Added
 
 - macOS HAL scheduling now supports 32 queued stimuli with ids, per-stimulus

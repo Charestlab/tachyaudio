@@ -59,8 +59,9 @@ class ScheduledOutputStream:
         derived from native output timestamps/delay after ``start()`` (see
         ``lead_time``).
     latency:
-        Requested device buffer in seconds. Linux: ``None`` chooses 5 ms
-        with real-time priority, otherwise 20 ms. macOS: ``None`` preserves
+        Requested device buffer in seconds. Linux: ``None`` chooses, with
+        real-time priority, 2 ms for a PCI card (onboard HDA) and 5 ms for USB
+        or other buses; without it 20 ms. macOS: ``None`` preserves
         the current HAL buffer; an explicit value changes the SHARED device
         buffer and restores it on close if it still matches this stream's
         setting. Avoid concurrent streams with different explicit settings.
@@ -162,7 +163,15 @@ class ScheduledOutputStream:
         if target_ns - time.monotonic_ns() < lead_ns:
             raise SchedulingError("insufficient advance notice for scheduled onset")
         view, _, _ = _validate_frames(frames, self.config.channels)
-        stimulus = self._handle.schedule(view, target_ns, lead_ns)
+        try:
+            stimulus = self._handle.schedule(view, target_ns, lead_ns)
+        except ValueError as error:
+            # The native layer re-checks the notice after copying the stimulus;
+            # a deadline that passed the check above by microseconds can fail
+            # there. Report it as the same SchedulingError.
+            if "insufficient advance notice" in str(error):
+                raise SchedulingError("insufficient advance notice for scheduled onset") from error
+            raise
         self._latest = stimulus
         return self._latest
 

@@ -85,9 +85,9 @@ Where defaults differ they are given as tachyaudio / tachypy.
 | Parameter | Default | Meaning | Set it when |
 |---|---|---|---|
 | `device_id` | required | `hw:CARD=Name,DEV=M` or `hw:N,M`, from the list above. | Always. |
-| `sample_rate` | 48000 / 44100 | Rate of your stimuli. Must be supported by the device (`aplay -D hw:N,M --dump-hw-params /dev/zero`); nothing is resampled. | Always. |
+| `sample_rate` | 48000 / 44100 | Rate of your stimuli. Must be supported by the device (`aplay -D hw:N,M --dump-hw-params /dev/zero`); nothing is resampled. Onsets fall on the sample grid and are never early, so placement error is 0 to 1 sample: up to 20.8 µs at 48 kHz, 10.4 µs at 96 kHz, 5.2 µs at 192 kHz. | Always; use the highest rate the device supports when onset precision matters. |
 | `channels` | 2 / 1 | Channels of your stimuli. Mono is copied to every device channel. | Multichannel stimuli. |
-| `latency` | automatic | ALSA buffer in seconds, as for `OutputStream(latency=...)`: 5 ms when real-time priority is available, else 20 ms. Changes the required advance notice, not the precision. | Rarely: more margin on an unusual or overloaded machine. |
+| `latency` | automatic | ALSA buffer in seconds, as for `OutputStream(latency=...)`. With real-time priority: 2 ms on a PCI card (onboard HDA), 5 ms on USB or any other bus; without it 20 ms. Changes the required advance notice, not the precision. | Rarely: more margin on an unusual or overloaded machine. |
 | `minimum_lead_time` | automatic | Advance notice `schedule`/`play` require: largest measured output delay + one period + 2 ms. Read it as `stream.lead_time`. | To impose one fixed value on every device. |
 | `timeout` (tachypy) | `None` | Limit on waiting for completion. | Optional. |
 
@@ -104,7 +104,7 @@ clock-model diagnostics `clock_observations`, `clock_ppm`, `clock_jitter_us`,
 | `needs device_id='hw:...'` | Pass a `device_id` from the printed list. |
 | `Could not open ...`, device shown `in use by ...` | Close the program holding it. PipeWire keeps a device open while any application uses it (the GNOME Sound settings panel, for example, keeps the microphone open). |
 | `Could not open ...`, device free | The device does not support that `sample_rate` or channel count; check with `aplay -D hw:N,M --dump-hw-params /dev/zero`. |
-| `insufficient advance notice` | Schedule further ahead than `stream.lead_time`. |
+| `insufficient advance notice` (`SchedulingError`) | Schedule further ahead than `stream.lead_time`, with some margin: the check is repeated after the stimulus is copied, so a deadline exactly at `lead_time` can just miss it. |
 | `overlaps a stimulus already scheduled` | Two sounds cannot overlap on one stream; shift `when` (exactly back to back is allowed) or mix them into one array. |
 | `too many stimuli queued (32)` | Wait for earlier sounds to finish before queuing more. |
 | `status()['rt_method'] == 'none'` | No real-time priority (no rtkit, no rtprio grant): the automatic buffer is 20 ms and heavy CPU load can still cause faults. Install/enable rtkit, or add an rtprio limit (e.g. `@audio - rtprio 95` in `/etc/security/limits.d/`, user in group `audio`). |
@@ -179,6 +179,27 @@ automatic `latency`:
 
 Idle, every buffer from 3 to 40 ms rendered 40/40 with 29–104 µs jitter.
 
+**PCI (onboard ALC897, `hw:CARD=PCH,DEV=0`, `s32_le`), real-time priority**,
+300 silent 10 ms stimuli per setting, each due 0.5–2.5 ms past `lead_time`,
+device-clock placement (not acoustic):
+
+| buffer | `lead_time` | idle, 48/96/192 kHz | every core busy, 48/192 kHz |
+|---|---|---|---|
+| 5 ms (former default) | 8.25 ms | 300/300 each | 300/300 each |
+| 3 ms | 5.75 ms | 300/300 each | 300/300 each |
+| **2 ms (new default)** | **4.5 ms** | 300/300 each | 300/300 each |
+| 1.5 ms | 3.88 ms | 300/300 each | 300/300, 299/300 (one dropped) |
+| 1 ms | 3.25 ms | 300/300 each | 300/300 each |
+
+With further runs of the new 2 ms default with every core busy, totals are
+1800/1800 at 48 kHz and 1799/1800 at 192 kHz (one stimulus dropped and
+reported, none late); idle, 800/800 at each rate.
+
+Placement error was 0 to 1 sample in every run (mean ≈ half a sample:
+10.5 µs at 48 kHz, 5 µs at 96 kHz, 2.6 µs at 192 kHz). The same check on the
+USB headset: 2 ms faulted at once, 3 ms dropped 1 of 300 idle, 4 and 5 ms
+rendered 300/300 idle and under load, so USB keeps 5 ms.
+
 **Queue.** Twenty 10 ms chirps queued at once, 50 ms apart: 14 µs jitter, the
 same as one at a time (13 µs). Two chirps queued back to back: measured seam
 10 ms − 10 µs, under one sample. One at a time (schedule, wait, schedule), the
@@ -188,9 +209,25 @@ automatic ones; queued, there is no minimum. The
 onboard ALC897 (`hw:CARD=PCH,DEV=0`, `s32_le`) passed the silent internal probe
 (150 trials, no failure, placement within one sample), with an earlier build.
 
+**PsychPortAudio** (Python `psychtoolbox` 3.0.22.2, latency class 3), measured
+with the same headset loopback, chirp and matched filter, alternating engines
+run by run, 40 chirps per run, both at rtkit priority 20 and a 5 ms buffer:
+
+| | tachyaudio | PsychPortAudio |
+|---|---|---|
+| jitter within a run, idle (4 runs) | 57 µs std | 96 µs std |
+| jitter within a run, every core busy (2 runs) | 31 µs std | 61 µs std |
+| shift of the mean onset under load | < 0.1 ms | +1.1 and +5.1 ms |
+
+PsychPortAudio reported each start at exactly the requested time, so its
+5 ms shift went unreported. From Python it also needed workarounds here: its
+audio thread segfaults when it cannot get real-time priority (it prints
+without the GIL), and its blocking calls hold the GIL. One device, a wireless
+one; a wired electrical loopback would remove the headset's radio jitter.
+
 Not yet shown: absolute latency (needs an electrical reference, see
-[electrical loopback](electrical-loopback.md)), a wired interface without the
-headset's radio, and any comparison with PsychPortAudio.
+[electrical loopback](electrical-loopback.md)) and a wired interface without
+the headset's radio.
 
 ### Running it yourself
 

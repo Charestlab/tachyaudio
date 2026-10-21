@@ -181,7 +181,8 @@ class LinuxDefaultsTests(unittest.TestCase):
             self.assertAlmostEqual(stream.lead_time, 0.010 + 0.005 + 0.002)
             with self.assertRaises(ta.SchedulingError):
                 stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 0.012)
-            stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 0.050)
+            # Far beyond the 17 ms lead time, so a descheduled test thread cannot matter.
+            stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 1.0)
             self.assertEqual(handle.schedule.call_args.args[2], 17_000_000)
             fixed = ta.ScheduledOutputStream(device_id="hw:0,0", minimum_lead_time=0.1,
                                              latency=0.02)

@@ -145,7 +145,7 @@ class PublicApiTests(unittest.TestCase):
         stream.start()
         self.assertTrue(backend.handle.started)
         self.assertEqual(stream.write(b"frames"), 12)
-        self.assertTrue(stream.drain(timeout=0.1))
+        self.assertTrue(stream.drain(timeout=5))
         self.assertEqual(stream.stats().frames_processed, 12)
         stream.flush()
         self.assertEqual(stream.stats().queued_frames, 0)
@@ -203,7 +203,7 @@ class PublicApiTests(unittest.TestCase):
 
         backend = Backend()
         ta.set_backend(backend)
-        stats = ta.play(b"\x00" * 16, channels=1, timeout=0.1)
+        stats = ta.play(b"\x00" * 16, channels=1, timeout=5)
         self.assertEqual(stats.frames_processed, 4)
         self.assertEqual(backend.handle.events, ["write", "drain", "start", "drain"])
 
@@ -253,7 +253,7 @@ class PublicApiTests(unittest.TestCase):
         ta.set_backend(Backend())
         stream = ta.OutputStream(channels=1)
         try:
-            self.assertEqual(stream.write_all(b"\x00" * 12, timeout=0.1), 3)
+            self.assertEqual(stream.write_all(b"\x00" * 12, timeout=5), 3)
             self.assertEqual(stream.stats().frames_processed, 3)
         finally:
             stream.close()
@@ -402,7 +402,7 @@ class PublicApiTests(unittest.TestCase):
         ta.set_backend(Backend())
         stream = ta.InputStream(channels=1)
         try:
-            data = stream.read_exactly(4, timeout=0.1)
+            data = stream.read_exactly(4, timeout=5)
             self.assertEqual(bytes(data), b"\x01" * 8 + b"\x02" * 8)
         finally:
             stream.close()
@@ -577,8 +577,8 @@ class PublicApiTests(unittest.TestCase):
         ta.set_backend(Backend())
         stream = ta.DuplexStream(input_channels=1, output_channels=1)
         try:
-            self.assertEqual(stream.write_all(b"\x00" * 12, timeout=0.1), 3)
-            data = stream.read_exactly(4, timeout=0.1)
+            self.assertEqual(stream.write_all(b"\x00" * 12, timeout=5), 3)
+            data = stream.read_exactly(4, timeout=5)
             self.assertEqual(bytes(data), b"\x01" * 8 + b"\x02" * 8)
         finally:
             stream.close()
