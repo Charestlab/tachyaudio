@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
-import time
 from typing import Any
 
 from tachyaudio._backend import get_backend
 from tachyaudio._errors import StreamClosed
-
 
 _POLL_INTERVAL = 0.001
 
@@ -197,6 +196,10 @@ def _read_exactly_from_handle(
 class OutputStream:
     """Playback stream.
 
+    Construction opens the device and allocates buffers. ``start()`` runs the
+    audio engine, emitting silence if no frames have been supplied. ``write()``
+    supplies samples; neither call reports their physical acoustic onset.
+
     This class is intentionally thin. Backend implementations own real-time
     audio resources and expose a small handle with `start`, `stop`, `write`,
     and `stats` methods.
@@ -237,7 +240,12 @@ class OutputStream:
         return self._closed
 
     def start(self) -> None:
-        """Start playback."""
+        """Start the audio engine (silence until queued samples arrive).
+
+        This does not open the device; construction already did that. Prefill
+        with ``write()`` first to avoid initial empty buffers, or start empty
+        to warm the engine before a later stimulus.
+        """
 
         self._require_open()
         self._handle.start()
@@ -249,10 +257,12 @@ class OutputStream:
         self._handle.stop()
 
     def drain(self, timeout: float | None = None) -> bool:
-        """Wait until queued frames have been consumed.
+        """Wait for queued audio while leaving the playback engine running.
 
         Returns `True` when the stream drains before `timeout`, or `False` on
         timeout. `timeout=None` waits indefinitely.
+        An empty running stream emits silence. Drain completion is a software
+        estimate, not a measurement of sound reaching the speaker.
         """
 
         self._require_open()
@@ -326,8 +336,16 @@ def play(
         dtype=dtype,
     )
     try:
+        _validate_timeout(timeout)
+        view, frame_bytes, total_frames = _validate_frames(frames, channels)
+        accepted = stream.write(view)
+        if not 0 <= accepted <= total_frames:
+            raise RuntimeError("backend returned an invalid frame count")
+        if accepted == total_frames:
+            stream.drain(timeout=0)
         stream.start()
-        stream.write_all(frames, timeout)
+        if accepted < total_frames:
+            stream.write_all(view[accepted * frame_bytes :], timeout)
         if not stream.drain(timeout):
             raise TimeoutError("audio playback did not drain before timeout")
         return stream.stats()
