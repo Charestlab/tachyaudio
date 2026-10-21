@@ -1,22 +1,52 @@
-# Native scheduling: experimental macOS implementation
+# Native scheduling (`ScheduledOutputStream`)
 
-An initial Linux ALSA implementation now uses the same public API. See
-[Ubuntu handoff](ubuntu-scheduling.md) for its different timing basis and pending
-hardware validation. Windows scheduled output remains unimplemented.
+`ScheduledOutputStream` plays finite stimuli at absolute monotonic times,
+placed by native code on the device clock. tachypy exposes it as
+`Audio(timing_mode="native")`; ordinary streams never use it.
 
-The objective is to match and, if independent measurements support it, surpass
-PsychPortAudio's timing performance. No superiority or physical-onset accuracy
-claim has been established. The existing `OutputStream` and default tachypy
-scheduler do not automatically use this path. The companion tachypy integration
-adds explicit `Audio(timing_mode="native")`; it requires this development build.
+- **macOS**: Core Audio `AudioDeviceIOProc`, described below.
+- **Linux**: direct ALSA on a `hw:` device; see
+  [Linux scheduled output](linux-scheduling.md) for setup, parameters and
+  validation.
+- **Windows**: not implemented.
 
-See [electrical loopback](electrical-loopback.md) for practical measurement wiring,
-clock-reference requirements, and the distinction from dedicated TDT hardware.
+The goal is to match, and if independent measurements show it, surpass
+PsychPortAudio's timing. No such claim, nor any physical-onset accuracy claim,
+has been established yet; see [electrical loopback](electrical-loopback.md) for
+how to measure it.
 
-## Architecture
+## Usage
 
-`ScheduledOutputStream` uses a Core Audio `AudioDeviceIOProc` directly, rather
-than the existing AudioQueue ring-buffer path. Python supplies the complete
+```python
+from array import array
+import time
+import tachyaudio as ta
+
+# On Linux also pass device_id="hw:CARD=...,DEV=..."
+with ta.ScheduledOutputStream(sample_rate=48000, channels=1) as stream:
+    stream.schedule(array("f", [0.0]) * 4800, when=time.monotonic() + 0.150)
+    timing = stream.wait(timeout=2)
+    print(timing.predicted_error_seconds)
+```
+
+Construction opens the device; `start()` (or the context manager) starts it
+playing silence. `schedule()` copies the stimulus and needs `stream.lead_time`
+of advance notice: 50 ms on macOS (a conservative policy, not an onset delay),
+the measured device delay plus a margin on Linux, or `minimum_lead_time` if
+given. On Linux `schedule()` returns an id and up to 32 stimuli can be queued
+ahead (`wait(stimulus=id)`, `cancel(id)`); macOS holds one at a time.
+Overlapping stimuli are rejected: there is no mixer.
+
+`wait_rendered()` returns once every sample is in device buffers, possibly
+**before onset** for a short stimulus. `wait()` also waits through the
+predicted end plus one buffer, so closing afterwards cannot cut the sound.
+Neither is a physical measurement. A wait timeout does not cancel playback; use
+`cancel()` or `close()`.
+
+## macOS architecture
+
+On macOS, `ScheduledOutputStream` uses a Core Audio `AudioDeviceIOProc`
+directly, rather than the AudioQueue ring-buffer path of ordinary streams. Python supplies the complete
 stimulus and an absolute monotonic deadline ahead of time. The C callback uses
 the device-provided output timestamp to select the first sample position within
 an output buffer. It supplies silence until that position, then the stimulus.
@@ -34,38 +64,9 @@ onset is dropped instead of silently played late. If a failure occurs after a
 stimulus has begun, already delivered samples cannot be recalled. Cancellation
 likewise stops subsequent rendering, not samples already handed to the device.
 
-## Usage
+## Validation implemented (macOS)
 
-```python
-from array import array
-import time
-import tachyaudio as ta
-
-with ta.ScheduledOutputStream(sample_rate=48000, channels=1) as stream:
-    samples = array("f", [0.0]) * 4800
-    stream.schedule(samples, when=time.monotonic() + 0.150)
-    timing = stream.wait(timeout=2)
-    print(timing.predicted_error_seconds)
-```
-
-Construction opens the device; `start()` (or the context manager) starts the
-silent engine. `schedule()` copies a finite stimulus and publishes its deadline.
-It requires at least 50 ms of advance notice by default, including after copying
-the data. This is a conservative submission policy, not an onset delay or a
-proven minimum requirement. Requests cannot overlap on one scheduled stream.
-
-`wait_rendered()` returns once all samples have been copied to device buffers.
-It may return **before onset** for a short stimulus. Keep the device running.
-`wait()` additionally waits through the predicted end plus one device-buffer
-interval to avoid immediately closing while the scheduled audio is still ahead
-of the device clock. Neither is an independent physical-completion measurement.
-A wait timeout does not cancel playback; use `cancel()` or `close()` explicitly.
-
-The current API is experimental, macOS-only, and does not provide a playlist or
-overlap mixer. Linux/Windows precision scheduling and tachypy integration need
-their own implementation and validation. Normal streaming remains available.
-
-## Validation implemented
+For Linux, see [Linux scheduled output](linux-scheduling.md#validation).
 
 - The actual C renderer is tested without hardware for within-buffer placement,
   continuation across buffers, silent lead-in, missed onsets, discontinuities,

@@ -96,6 +96,76 @@ class ScheduledApiTests(unittest.TestCase):
         self.handle.close.assert_not_called()
 
 
+class LinuxDefaultsTests(unittest.TestCase):
+    def test_missing_hw_device_lists_available_devices(self) -> None:
+        with patch("tachyaudio._scheduled.sys.platform", "linux"), \
+                patch("tachyaudio._alsa_devices.describe_alsa_outputs",
+                      return_value="DEVICE TABLE"):
+            for device in (None, "default", "pulse"):
+                with self.subTest(device=device), \
+                        self.assertRaisesRegex(ValueError, "device_id(.|\n)*DEVICE TABLE"):
+                    ta.ScheduledOutputStream(device_id=device)
+
+    def test_queue_ids_reach_native_wait_and_cancel(self) -> None:
+        handle = Mock()
+        handle.status.return_value = {"output_delay_max_us": 0.0, "period_frames": 48,
+                                      "buffer_frames": 0, "state": 4}
+        handle.schedule.side_effect = [1, 2]
+        record = {"state": 4, "requested_ns": 1, "predicted_onset_ns": 1,
+                  "render_callback_ns": 0, "render_complete_ns": 0,
+                  "predicted_end_ns": 1, "rendered_frames": 1}
+        handle.result.return_value = record
+        native = Mock()
+        native.ScheduledOutputStream.return_value = handle
+        with patch.dict(sys.modules, {"tachyaudio._scheduled_alsa": native}), \
+                patch.object(ta, "_scheduled_alsa", native, create=True), \
+                patch("tachyaudio._scheduled.sys.platform", "linux"):
+            stream = ta.ScheduledOutputStream(device_id="hw:0,0")
+            with self.assertRaises(ta.SchedulingError):
+                stream.wait_rendered(timeout=0)
+            first = stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 1)
+            second = stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 2)
+            self.assertEqual((first, second), (1, 2))
+            stream.wait(timeout=1, stimulus=first)
+            handle.result.assert_called_with(1)
+            stream.wait_rendered(timeout=1)
+            handle.result.assert_called_with(0)
+            stream.cancel(second)
+            handle.cancel.assert_called_with(2)
+            stream.cancel()
+            handle.cancel.assert_called_with(0)
+            self.assertFalse(stream.failed)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "reads /proc/asound")
+    def test_device_listing_is_well_formed(self) -> None:
+        for device in ta.list_alsa_outputs():
+            self.assertRegex(device.device_id, r"^hw:CARD=[^,]+,DEV=\d+$")
+            self.assertRegex(device.short_id, r"^hw:\d+,\d+$")
+            self.assertIn(device.kind, ("screen", "jacks", "digital", "USB", "other"))
+            self.assertIn(device.device_id, str(device))
+
+    def test_lead_time_follows_measured_output_delay_unless_given(self) -> None:
+        handle = Mock()
+        handle.status.return_value = {"output_delay_max_us": 10_000.0, "period_frames": 240}
+        native = Mock()
+        native.ScheduledOutputStream.return_value = handle
+        with patch.dict(sys.modules, {"tachyaudio._scheduled_alsa": native}), \
+                patch.object(ta, "_scheduled_alsa", native, create=True), \
+                patch("tachyaudio._scheduled.sys.platform", "linux"):
+            stream = ta.ScheduledOutputStream(device_id="hw:0,0")
+            native.ScheduledOutputStream.assert_called_once_with(48_000, 2, "hw:0,0")
+            self.assertAlmostEqual(stream.lead_time, 0.010 + 0.005 + 0.002)
+            with self.assertRaises(ta.SchedulingError):
+                stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 0.012)
+            stream.schedule(array("f", [0.0, 0.0]), when=time.monotonic() + 0.050)
+            self.assertEqual(handle.schedule.call_args.args[2], 17_000_000)
+            fixed = ta.ScheduledOutputStream(device_id="hw:0,0", minimum_lead_time=0.1,
+                                             latency=0.02)
+            self.assertEqual(fixed.lead_time, 0.1)
+            self.assertEqual(native.ScheduledOutputStream.call_args.args,
+                             (48_000, 2, "hw:0,0", 20_000))
+
+
 @unittest.skipUnless(sys.platform == "darwin", "macOS native renderer")
 class NativeRendererTests(unittest.TestCase):
     def render(self, samples, offset, *, frames=8, callbacks=3, gap=False):

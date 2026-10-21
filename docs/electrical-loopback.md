@@ -2,12 +2,13 @@
 
 ## Evidence so far
 
-The initial 600 silent native scheduling trials reported no deadline failures.
-Predicted onset residuals stayed within one 48 kHz sample (20.833 microseconds),
-as expected from the placement calculation. These are not independent DAC or
-acoustic measurements. Neither equivalence to TDT nor superiority to
-PsychPortAudio has been demonstrated. A 50 ms minimum scheduling head start is
-advance notice, not measured output latency or closed-loop response time.
+Silent native scheduling trials (macOS and Linux) place onsets within one
+sample of the device-clock estimate, which checks the placement arithmetic, not
+the output. On Linux an acoustic loopback through a USB headset measured onset
+jitter of about 15–70 µs (see [Linux scheduled output](linux-scheduling.md#validation)),
+but not absolute latency. Neither equivalence to TDT nor superiority to
+PsychPortAudio has been shown; the scheduling lead time is advance notice, not
+output latency. The wiring below is what an absolute measurement needs.
 
 ## Practical wiring
 

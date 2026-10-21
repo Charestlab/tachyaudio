@@ -3,9 +3,11 @@
 `tachyaudio` is a low-level audio package intended to replace tachypy’s direct
 dependency on `sounddevice`/PortAudio over time.
 
-Status: beta. The native backend currently supports macOS through Core Audio,
-Linux through vendored `miniaudio`, and Windows through vendored `miniaudio`
-using WASAPI.
+Status: beta. Ordinary streams use Core Audio on macOS, vendored `miniaudio`
+on Linux (PulseAudio/PipeWire first, ALSA as fallback) and vendored `miniaudio`
+with WASAPI on Windows. Experimental device-clock scheduling
+(`ScheduledOutputStream`) is available on macOS (Core Audio) and Linux (direct
+ALSA); not yet on Windows. See [Linux: which audio path is used](#linux-which-audio-path-is-used).
 
 ## Goals
 
@@ -78,6 +80,27 @@ Lifecycle semantics:
 - `estimated_latency`: `queued_latency + hardware_latency` when hardware latency
   is available, otherwise queued latency
 - `buffer_size`: native callback buffer size in frames
+
+## Linux: which audio path is used
+
+Linux has two independent paths; the class you use (in tachypy,
+`Audio(timing_mode=...)`) decides which one plays your sound.
+
+| | Ordinary streams | Scheduled output |
+|---|---|---|
+| API | `OutputStream`, `InputStream`, `DuplexStream`, `play()`; tachypy `timing_mode="software"` (default) | `ScheduledOutputStream`; tachypy `timing_mode="native"` |
+| Route | `miniaudio` → PulseAudio/PipeWire (ALSA if no sound server) | ALSA directly, bypassing PulseAudio/PipeWire |
+| Device ids | `list_devices()`, e.g. `output-alsa_output.usb-...analog-stereo` | `hw:CARD=PCH,DEV=0`; run `python3 -c "import tachyaudio; tachyaudio.ScheduledOutputStream()"` to list them |
+| Sharing | mixed with other applications | exclusive: the device must be free |
+| Onset | a Python thread wakes at `when`, then the server buffers | a native real-time thread places the first sample on the device clock |
+| Measured jitter ¹ | 3.4 ms std | about 70 µs std |
+
+¹ Acoustic loopback through one USB wireless headset, which contributes part of
+the native figure; not a comparison with PsychPortAudio.
+
+For timing-critical stimuli use scheduled output, ideally with a wired
+interface. Its setup, parameters (automatic by default), troubleshooting and
+validation are in [docs/linux-scheduling.md](docs/linux-scheduling.md).
 
 ## Development
 

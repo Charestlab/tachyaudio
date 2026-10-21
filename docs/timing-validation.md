@@ -1,5 +1,8 @@
 # Scheduled playback timing on macOS
 
+For Linux measurements (software mode vs direct-ALSA scheduling, acoustic
+loopback), see [Linux scheduled output](linux-scheduling.md).
+
 `start()` execution time is not stimulus timing precision. On a prepared stream,
 it mostly checks whether the engine is already running. Use the timing probe to
 measure scheduling and native queue submission separately.

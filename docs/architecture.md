@@ -15,12 +15,20 @@ The public Python API delegates to an internal backend protocol:
 - `open_output_stream(config)`
 - `open_input_stream(config)`
 
-The first production backend should be native. The current first slices expose
-macOS Core Audio device enumeration and output playback directly so the build
-and Python boundary can be validated. Playback uses preallocated Core Audio
-queue buffers fed by a native ring buffer. A future cross-platform
-implementation can move to vendored `miniaudio` once the desired callback,
-buffering, and drain semantics are clearer.
+All backends are native C extensions:
+
+- **macOS**: Core Audio directly. Playback uses preallocated AudioQueue buffers
+  fed by a native ring buffer.
+- **Linux and Windows**: vendored `miniaudio` behind the same ring-buffer design.
+  On Linux, `miniaudio` tries the PulseAudio API first (served by PipeWire on
+  current distributions) and falls back to ALSA when no sound server is
+  reachable; device ids from `list_devices()` are sound-server nodes. Windows
+  uses WASAPI.
+- **Scheduled output** (`ScheduledOutputStream`) is separate from all of the
+  above: Core Audio's `AudioDeviceIOProc` on macOS and a dedicated direct-ALSA
+  extension (`_scheduled_alsa`) on Linux that bypasses the sound server. See
+  [native scheduling](native-scheduling.md) and
+  [Linux scheduled output](linux-scheduling.md).
 
 Finite playback uses an explicit drain mode: partial final buffers and idle
 callbacks are filled with silence without counting as underruns after drain is
@@ -96,7 +104,8 @@ Ship wheels for supported platforms:
 
 - macOS arm64/x86_64 using Core Audio
 - Windows x86_64/arm64 using WASAPI
-- Linux x86_64/aarch64 using the best available runtime backend
+- Linux x86_64/aarch64 using `miniaudio` (PulseAudio/PipeWire, ALSA fallback)
+  for streams and runtime-loaded `libasound.so.2` for scheduled output
 
 Source builds should remain possible, but routine users should not need to
 install PortAudio or a compiler.

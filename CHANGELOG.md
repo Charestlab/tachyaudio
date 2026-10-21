@@ -12,21 +12,50 @@ public APIs may still change while the backend design stabilizes.
 - Initial direct ALSA scheduled output with explicit hardware selection,
   monotonic status/delay estimates, float32/signed-16 hardware formats and
   simulated-worker tests. Ubuntu hardware validation remains pending; see
-  `docs/ubuntu-scheduling.md`. Windows scheduling remains unavailable.
+  `docs/linux-scheduling.md`. Windows scheduling remains unavailable.
 - Linux ALSA `ScheduledOutputStream` now negotiates signed-32-bit interleaved
   output as an intermediate precision tier between float32 and signed-16,
   matching common HDA/Realtek codecs that reject float32 but support 32-bit
   containers. Confirmed on real Ubuntu hardware (`hw:CARD=PCH,DEV=0`, ALC897):
   negotiation now lands on `s32_le` instead of falling all the way back to
   `s16_le`. `status()['device_format']` reports which tier was selected.
-- The ALSA scheduling worker thread now makes a best-effort request for
-  `SCHED_FIFO` real-time priority on start, mirroring the protection
-  PsychPortAudio and PipeWire's rtkit-managed threads get against underruns
-  under system load. Without `CAP_SYS_NICE` or an `RLIMIT_RTPRIO` grant (the
-  default for an unprivileged user) this fails harmlessly and the worker
-  keeps running at normal priority; `status()['rt_priority']` reports whether
-  elevation succeeded. See `docs/ubuntu-scheduling.md` for the recommended
-  `limits.conf` grant to enable it on a lab machine.
+- The ALSA scheduling worker thread now requests real-time priority on start:
+  `SCHED_FIFO` directly when permitted, otherwise `SCHED_RR` through rtkit over
+  D-Bus (libdbus loaded on demand), which works for an unprivileged Ubuntu
+  desktop user. `status()['rt_priority']` and `status()['rt_method']` report
+  the result. Measured on a USB headset under full CPU load, a 3 ms buffer
+  rendered 80/80 scheduled stimuli with RT; without it one run glitched by
+  milliseconds and another faulted at once.
+- Linux `ScheduledOutputStream` chooses its ALSA buffer and required advance
+  notice automatically: `latency=None` picks 5 ms when the worker can get
+  real-time priority and 20 ms otherwise (the smallest sizes that never failed
+  under full CPU load), and `minimum_lead_time=None` derives the advance
+  notice from the measured device output delay (`stream.lead_time`; about
+  12 ms instead of a fixed 50 ms on the tested USB device). Both remain
+  overridable. `status()` adds `buffer_automatic`, `period_frames`,
+  `output_delay_us`, `output_delay_max_us` and `device_channels`.
+- Linux `ScheduledOutputStream` queues up to 32 stimuli: `schedule()` returns
+  an id, `wait(stimulus=...)`, `wait_rendered(stimulus=...)` and
+  `cancel(stimulus)` target one stimulus (default: latest for waits, all for
+  cancel), and `failed` tells a stream fault from a dropped stimulus.
+  Overlaps are still rejected; back-to-back stimuli play without a gap
+  (measured seam under one sample). A missed onset now drops only that
+  stimulus. macOS keeps one stimulus at a time. tachypy's native mode queues
+  `play()` calls on one shared stream instead of rejecting them.
+- On Linux, `ScheduledOutputStream` without a `hw:` device, or one that fails to
+  open, now raises an error listing every ALSA playback device: stable id,
+  short id, type (monitor speakers over HDMI/DisplayPort, computer jacks,
+  digital, USB), whether a screen is connected and which process holds it.
+  `tachyaudio.list_alsa_outputs()` returns the same data.
+- `start()` now returns once the ALSA clock model has data (~30 ms) and ignores
+  the first 20 ms of status reads, which USB devices report ~1 ms early. A
+  stimulus scheduled right after `start()` previously landed ~450 µs late.
+- ALSA onset placement now uses a least-squares device-clock model fitted to
+  the last 2 s of status reads instead of trusting each read. On a USB device
+  this reduced measured acoustic onset jitter from 399 µs to about 30-70 µs
+  standard deviation (the remainder is the wireless headset's own drift). New
+  `status()` diagnostics: `clock_observations`, `clock_ppm`,
+  `clock_jitter_us` and `clock_resets`.
 - Experimental macOS `ScheduledOutputStream` with device-clock sample placement,
   native deadline failures, cancellation, render timing estimates, and tests
   under Python contention. See `docs/native-scheduling.md`; physical timing and
@@ -37,6 +66,13 @@ public APIs may still change while the backend design stabilizes.
 
 ### Fixed
 
+- Linux scheduled output now duplicates mono stimuli onto stereo-only devices,
+  as documented and as on macOS; it previously failed to open them, including
+  with tachypy's default `channels=1`. ALSA's messages about rejected trial
+  formats are no longer printed during negotiation.
+- ALSA scheduling no longer rejects USB audio devices: their reported delay
+  includes frames in flight beyond the ring buffer, which the worker treated
+  as a clock fault at its first status read.
 - Prefill finite playback before starting without blocking on clips larger than
   the ring buffer.
 - Keep macOS output running after drain for stream reuse; include pending
