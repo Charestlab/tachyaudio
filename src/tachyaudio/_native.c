@@ -3632,6 +3632,7 @@ static PyObject *tachy_backend_name(PyObject *self, PyObject *args)
 
 static PyMethodDef tachy_methods[] = {
 #ifdef __APPLE__
+    {"_scheduled_test_stream", tachy_core_test_stream, METH_VARARGS, "Create a synthetic scheduled stream."},
     {"_scheduled_render_test", tachy_scheduled_render_test, METH_VARARGS, "Exercise the native renderer without a device."},
 #endif
     {"backend_name", tachy_backend_name, METH_NOARGS, "Return the active native backend name."},

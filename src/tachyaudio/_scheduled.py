@@ -36,7 +36,7 @@ class ScheduledTiming:
 
 
 class ScheduledOutputStream:
-    """Opt-in native scheduler for one finite stimulus at a time.
+    """Opt-in native scheduler for up to 32 non-overlapping finite stimuli.
 
     macOS uses Core Audio output timestamps on the device's current
     configuration. Linux opens an explicit ALSA ``hw:`` device directly
@@ -56,14 +56,16 @@ class ScheduledOutputStream:
         ``hw:CARD,DEVICE`` (``aplay -l``), not in use by another program.
     minimum_lead_time:
         Seconds of advance notice ``schedule()`` requires. ``None`` (default):
-        on Linux, derived from the device after ``start()`` (see
-        ``lead_time``); on macOS, 50 ms.
+        derived from native output timestamps/delay after ``start()`` (see
+        ``lead_time``).
     latency:
-        Linux only. Requested ALSA buffer in seconds, as for ``OutputStream``.
-        ``None`` (default) chooses 5 ms when the worker can obtain real-time
-        priority (rtkit or an rtprio grant), otherwise 20 ms. Smaller shortens
-        the device output delay and thus ``lead_time``; it does not change
-        onset precision.
+        Requested device buffer in seconds. Linux: ``None`` chooses 5 ms
+        with real-time priority, otherwise 20 ms. macOS: ``None`` preserves
+        the current HAL buffer; an explicit value changes the SHARED device
+        buffer and restores it on close if it still matches this stream's
+        setting. Avoid concurrent streams with different explicit settings.
+        Smaller buffers shorten output delay and ``lead_time``; they do not
+        establish physical onset precision.
     """
 
     def __init__(
@@ -90,8 +92,8 @@ class ScheduledOutputStream:
                 f"PulseAudio/PipeWire); got {device_id!r}.\n\n{describe_alsa_outputs()}"
             )
         if latency is not None:
-            if not sys.platform.startswith("linux"):
-                raise ValueError("latency is supported only by the Linux ALSA scheduler")
+            if sys.platform not in ("darwin", "linux"):
+                raise ValueError("latency requires the Core Audio or ALSA scheduler")
             if not math.isfinite(latency) or not 0.001 <= latency <= 1.0:
                 raise ValueError("latency must be between 0.001 and 1.0 seconds")
         try:
@@ -143,9 +145,9 @@ class ScheduledOutputStream:
     def schedule(self, frames: Any, *, when: float) -> int:
         """Copy a whole float32 stimulus ahead of an absolute monotonic deadline.
 
-        Returns the stimulus id for ``wait``/``cancel``. On Linux up to 32
-        stimuli can be queued ahead, back to back if desired; on macOS one at a
-        time. A stimulus overlapping one already queued, or due sooner than
+        Returns the stimulus id for ``wait``/``cancel``. Up to 32 stimuli
+        can be queued ahead on macOS and Linux, back to back if desired.
+        A stimulus overlapping one already queued, or due sooner than
         ``lead_time``, is rejected. Python does not need to run again at onset.
         A stimulus whose onset can no longer be met is dropped and reported by
         ``wait`` rather than played late.
@@ -161,22 +163,20 @@ class ScheduledOutputStream:
             raise SchedulingError("insufficient advance notice for scheduled onset")
         view, _, _ = _validate_frames(frames, self.config.channels)
         stimulus = self._handle.schedule(view, target_ns, lead_ns)
-        # The macOS renderer holds a single stimulus and does not number them.
-        self._latest = stimulus if isinstance(stimulus, int) else (self._latest or 0) + 1
+        self._latest = stimulus
         return self._latest
 
     @property
     def lead_time(self) -> float:
         """Advance notice, in seconds, that schedule() requires.
 
-        Equals ``minimum_lead_time`` when one was given. Otherwise Linux derives
-        it from the device after start(): the largest output delay observed,
-        plus one period and 2 ms. macOS uses 50 ms.
+        Equals ``minimum_lead_time`` when one was given. Otherwise uses the
+        largest native output delay observed after start(), plus one device
+        period and 2 ms. Core Audio supplies output host timestamps directly;
+        ALSA estimates them from its status/delay clock model.
         """
         if self.minimum_lead_time is not None:
             return self.minimum_lead_time
-        if not sys.platform.startswith("linux"):
-            return 0.050
         status = self._handle.status()
         period = status["period_frames"] / self.config.sample_rate
         return float(status["output_delay_max_us"] / 1e6 + period + 0.002)
@@ -254,22 +254,15 @@ class ScheduledOutputStream:
         Samples already handed to the device cannot be recalled.
         """
         self._require_open()
-        if sys.platform.startswith("linux"):
-            self._handle.cancel(stimulus or 0)
-        elif stimulus is None or stimulus == self._latest:
-            self._handle.cancel()
+        self._handle.cancel(stimulus or 0)
 
     def _record(self, stimulus: int | None) -> dict[str, Any]:
-        if sys.platform.startswith("linux"):
-            if self._latest is None:
-                raise SchedulingError("no stimulus has been scheduled")
-            try:
-                return dict(self._handle.result(stimulus or 0))
-            except LookupError as error:
-                raise ValueError(str(error)) from error
-        if stimulus is not None and stimulus != self._latest:
-            raise ValueError("this platform keeps only the latest stimulus")
-        return self.status()
+        if self._latest is None:
+            raise SchedulingError("no stimulus has been scheduled")
+        try:
+            return dict(self._handle.result(stimulus or 0))
+        except LookupError as error:
+            raise ValueError(str(error)) from error
 
     def close(self) -> None:
         if not self._closed:

@@ -9,6 +9,15 @@ public APIs may still change while the backend design stabilizes.
 
 ### Added
 
+- macOS HAL scheduling now supports 32 queued stimuli with ids, per-stimulus
+  results/cancellation, independent missed-onset handling, automatic lead time
+  from native output timestamps and ready-clock startup. Optional `latency`
+  requests a shared HAL buffer size with conditional restoration on close.
+  Core Audio diagnostics, clock/device-change faults, deterministic queue tests
+  and an integrated-speaker/microphone interval probe accompany the change.
+- ALSA simulated-worker tests compile on macOS again: Linux-only RTPRIO limit
+  checks are guarded without changing the Linux implementation.
+
 - Initial direct ALSA scheduled output with explicit hardware selection,
   monotonic status/delay estimates, float32/signed-16 hardware formats and
   simulated-worker tests. Ubuntu hardware validation remains pending; see

@@ -222,9 +222,9 @@ static int alsa_rtkit(pid_t tid, unsigned int priority)
 /* Side-effect-free check used to pick the automatic buffer size. */
 static int alsa_realtime_available(void)
 {
+#ifdef __linux__
     struct rlimit limit;
     if (geteuid() == 0 || (getrlimit(RLIMIT_RTPRIO, &limit) == 0 && limit.rlim_cur > 0)) return 1;
-#ifdef __linux__
     const char *interface = "org.freedesktop.RealtimeKit1", *property = "MaxRealtimePriority";
     return alsa_rtkit_call("org.freedesktop.DBus.Properties", "Get",
                            's', &interface, 's', &property, 0);
@@ -239,10 +239,12 @@ static int alsa_promote(AlsaScheduled *self, const char **method)
     memset(&param, 0, sizeof(param));
     int maximum = sched_get_priority_max(SCHED_FIFO);
     param.sched_priority = maximum > 10 ? maximum - 10 : maximum;
+#ifdef __linux__
     struct rlimit allowed;
     if (geteuid() != 0 && getrlimit(RLIMIT_RTPRIO, &allowed) == 0 && allowed.rlim_cur != RLIM_INFINITY &&
         (rlim_t)param.sched_priority > allowed.rlim_cur)
         param.sched_priority = (int)allowed.rlim_cur;
+#endif
     if (maximum > 0 && pthread_setschedparam(self->thread, SCHED_FIFO, &param) == 0) {
         *method = "sched_setscheduler";
         return param.sched_priority;

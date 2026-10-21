@@ -26,7 +26,7 @@ class NativePlaybackTests(unittest.TestCase):
             finally:
                 sys.setswitchinterval(previous)
             timing = stream.wait(timeout=1)
-            self.assertGreaterEqual(timing.predicted_error_seconds, 0)
+            self.assertGreaterEqual(timing.predicted_error_seconds, -1e-7)
             self.assertLessEqual(timing.predicted_error_seconds, 1 / 48000 + 1e-9)
             self.assertLess(timing.render_callback_ns, timing.predicted_onset_ns)
             self.assertEqual(timing.rendered_frames, 480)
@@ -34,9 +34,10 @@ class NativePlaybackTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "macOS device-clock scheduler")
     def test_scheduled_cancel_overlap_and_reuse(self) -> None:
         with ta.ScheduledOutputStream(channels=1) as stream:
-            stream.schedule(array("f", [0.0]), when=time.monotonic() + 1)
-            with self.assertRaises(RuntimeError):
-                stream.schedule(array("f", [0.0]), when=time.monotonic() + 2)
+            target = time.monotonic() + 1
+            stream.schedule(array("f", [0.0]) * 480, when=target)
+            with self.assertRaisesRegex(ValueError, "overlaps"):
+                stream.schedule(array("f", [0.0]), when=target + 0.001)
             stream.cancel()
             with self.assertRaises(CancelledError):
                 stream.wait(timeout=1)

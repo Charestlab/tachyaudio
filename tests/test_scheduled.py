@@ -13,6 +13,8 @@ import tachyaudio as ta
 class ScheduledApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.handle = Mock()
+        self.handle.status.return_value = {"output_delay_max_us": 8000.0, "period_frames": 480, "buffer_frames": 480}
+        self.handle.schedule.return_value = 1
         native = Mock()
         native.ScheduledOutputStream.return_value = self.handle
         self.patch = patch.dict(sys.modules, {"tachyaudio._native": native})
@@ -35,7 +37,7 @@ class ScheduledApiTests(unittest.TestCase):
         view, actual_target, lead = self.handle.schedule.call_args.args
         self.assertEqual(view.tobytes(), array("f", [0.1]).tobytes())
         self.assertEqual(actual_target, round(target * 1e9))
-        self.assertEqual(lead, 50_000_000)
+        self.assertEqual(lead, 20_000_000)
 
     def test_late_deadline_is_rejected_without_submitting(self) -> None:
         with self.assertRaises(ta.SchedulingError):
@@ -49,21 +51,24 @@ class ScheduledApiTests(unittest.TestCase):
 
     def test_native_failures_and_cancellation_are_observable(self) -> None:
         for state in range(6, 11):
-            self.handle.status.return_value = {"state": state}
+            self.stream._latest = 1
+            self.handle.result.return_value = {"state": state}
             with self.subTest(state=state), self.assertRaises(ta.SchedulingError):
                 self.stream.wait(timeout=0)
-        self.handle.status.return_value = {"state": 5}
+        self.handle.result.return_value = {"state": 5}
         with self.assertRaises(CancelledError):
             self.stream.wait()
 
     def test_wait_timeout_does_not_cancel(self) -> None:
-        self.handle.status.return_value = {"state": 2}
+        self.stream._latest = 1
+        self.handle.result.return_value = {"state": 2}
         with self.assertRaises(TimeoutError):
             self.stream.wait(timeout=0)
         self.handle.cancel.assert_not_called()
 
     def test_render_result_is_not_reported_as_physical_onset(self) -> None:
-        self.handle.status.return_value = {
+        self.stream._latest = 1
+        self.handle.result.return_value = {
             "state": 4, "requested_ns": 1_000_000_000,
             "predicted_onset_ns": 1_000_010_000, "render_callback_ns": 980_000_000,
             "render_complete_ns": 980_001_000,
@@ -81,7 +86,8 @@ class ScheduledApiTests(unittest.TestCase):
             self.stream.schedule(array("f", [0.0]), when=time.monotonic() + 1)
 
     def test_wait_keeps_device_open_through_predicted_completion(self) -> None:
-        self.handle.status.return_value = {
+        self.stream._latest = 1
+        self.handle.result.return_value = {
             "state": 4, "requested_ns": 1_000_000_000,
             "predicted_onset_ns": 1_000_010_000, "render_callback_ns": 980_000_000,
             "render_complete_ns": 980_001_000, "predicted_end_ns": 1_010_010_000,
@@ -94,6 +100,24 @@ class ScheduledApiTests(unittest.TestCase):
         sleep.assert_called_once()
         self.assertEqual(result.rendered_frames, 480)
         self.handle.close.assert_not_called()
+
+    def test_macos_ids_lead_and_explicit_buffer_reach_native_api(self):
+        self.handle.schedule.side_effect = [7, 8]
+        self.assertAlmostEqual(self.stream.lead_time, .020)
+        first = self.stream.schedule(array("f", [0]), when=time.monotonic() + 1)
+        second = self.stream.schedule(array("f", [0]), when=time.monotonic() + 2)
+        self.assertEqual((first, second), (7, 8))
+        self.handle.result.return_value = {"state": 5}
+        with self.assertRaises(CancelledError):
+            self.stream.wait_rendered(stimulus=first)
+        self.handle.result.assert_called_with(7)
+        self.stream.cancel(first)
+        self.handle.cancel.assert_called_with(7)
+        self.stream.cancel()
+        self.handle.cancel.assert_called_with(0)
+        with ta.ScheduledOutputStream(latency=.005) as configured:
+            self.assertEqual(configured.config.sample_rate, 48000)
+        ta._native.ScheduledOutputStream.assert_called_with(48000, 2, None, 5000)
 
 
 class LinuxDefaultsTests(unittest.TestCase):
