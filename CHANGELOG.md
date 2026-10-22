@@ -7,6 +7,8 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+## [0.2.0b3] - 2026-10-22
+
 ### Changed
 
 - Linux automatic buffer with real-time priority is now 2 ms on PCI cards
