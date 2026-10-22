@@ -31,6 +31,22 @@ class ScheduledApiTests(unittest.TestCase):
         self.patch.stop()
         self.platform_patch.stop()
 
+    def test_immediate_submission_has_no_deadline_or_lead_guard(self) -> None:
+        self.stream.schedule_asap(array("f", [.1]))
+        view, requested, lead, immediate = self.handle.schedule.call_args.args
+        self.assertEqual(view.tobytes(), array("f", [.1]).tobytes())
+        self.assertLessEqual(requested, time.monotonic_ns())
+        self.assertEqual(lead, 0)
+        self.assertTrue(immediate)
+
+    def test_immediate_timing_is_delay_not_deadline_error(self) -> None:
+        from tachyaudio._scheduled import ScheduledTiming
+        result = ScheduledTiming(1_000_000, 21_000_000, 2_000_000, 2_100_000,
+                                 22_000_000, 48, immediate=True)
+        self.assertAlmostEqual(result.submission_to_onset_seconds, .020)
+        with self.assertRaisesRegex(ValueError, "no deadline"):
+            _ = result.predicted_error_seconds
+
     def test_schedule_submits_data_and_deadline_without_waiting_for_onset(self) -> None:
         target = time.monotonic() + 60
         self.stream.schedule(array("f", [0.1]), when=target)
@@ -202,6 +218,31 @@ class NativeRendererTests(unittest.TestCase):
             array("f", samples), 1, target, beginning, frames, callbacks, gap
         )
         return [list(memoryview(buffer).cast("f")) for buffer in buffers], status
+
+    def test_presentation_latency_advances_rendering_and_corrects_results(self) -> None:
+        from tachyaudio import _native
+        beginning = time.monotonic_ns() + 1_000_000_000
+        latency = round(70 * 1e9 / 48000)
+        target = beginning + latency + round(2.25 * 1e9 / 48000)
+        buffers, status = _native._scheduled_render_test(
+            array("f", [.5, .25]), 1, target, beginning, 8, 1, False, latency)
+        self.assertEqual(list(memoryview(buffers[0]).cast("f")), [0]*3 + [.5, .25] + [0]*3)
+        self.assertEqual(status["state"], 4)
+        self.assertGreaterEqual(status["predicted_onset_ns"], target)
+        self.assertLess(status["predicted_onset_ns"] - target, 1e9 / 48000)
+        self.assertAlmostEqual(status["presentation_latency_us"], latency / 1000)
+        self.assertAlmostEqual(status["predicted_end_ns"] - status["predicted_onset_ns"],
+                               2e9 / 48000, delta=2)
+
+    def test_presentation_latency_does_not_extend_render_deadline(self) -> None:
+        from tachyaudio import _native
+        beginning = time.monotonic_ns() - 100_000_000
+        latency = 1_000_000_000
+        buffers, status = _native._scheduled_render_test(
+            array("f", [.5]), 1, beginning + latency, beginning, 8, 1, False, latency)
+        self.assertEqual(list(memoryview(buffers[0]).cast("f")), [0]*8)
+        self.assertEqual(status["rendered_frames"], 0)
+        self.assertEqual(status["state"], 9)
 
     def test_places_samples_inside_buffer_and_preserves_continuation(self) -> None:
         buffers, status = self.render([0.25, 0.5, 0.75, 1], 6.25)

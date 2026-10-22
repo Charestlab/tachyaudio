@@ -105,7 +105,6 @@ clock-model diagnostics `clock_observations`, `clock_ppm`, `clock_jitter_us`,
 | `Could not open ...`, device shown `in use by ...` | Close the program holding it. PipeWire keeps a device open while any application uses it (the GNOME Sound settings panel, for example, keeps the microphone open). |
 | `Could not open ...`, device free | The device does not support that `sample_rate` or channel count; check with `aplay -D hw:N,M --dump-hw-params /dev/zero`. |
 | `insufficient advance notice` (`SchedulingError`) | Schedule further ahead than `stream.lead_time`, with some margin: the check is repeated after the stimulus is copied, so a deadline exactly at `lead_time` can just miss it. |
-| `overlaps a stimulus already scheduled` | Two sounds cannot overlap on one stream; shift `when` (exactly back to back is allowed) or mix them into one array. |
 | `too many stimuli queued (32)` | Wait for earlier sounds to finish before queuing more. |
 | `status()['rt_method'] == 'none'` | No real-time priority (no rtkit, no rtprio grant): the automatic buffer is 20 ms and heavy CPU load can still cause faults. Install/enable rtkit, or add an rtprio limit (e.g. `@audio - rtprio 95` in `/etc/security/limits.d/`, user in group `audio`). |
 | `SchedulingError` after starting (missed onset, clock changed, late callback) | The stimulus was dropped rather than played late. Reopen the stream; mark the trial invalid. |
@@ -127,7 +126,8 @@ clock-model diagnostics `clock_observations`, `clock_ppm`, `clock_jitter_us`,
   early, are ignored; a disagreement over 5 ms rebuilds the model
   (`clock_resets`). `start()` returns once the model has data (~30 ms).
 - Up to 32 stimuli can be queued; each period, every active one is added at
-  its sample position. Overlaps are rejected at `schedule`; a stimulus whose
+  its sample position, so overlapping stimuli mix (summed, then clamped to
+  [-1, 1] on conversion). A stimulus whose
   onset can no longer be met is dropped alone (`MISSED`), while a stream fault
   ends all of them. Finished records stay readable (`wait(stimulus=id)`)
   until 32 newer stimuli reuse their slots.

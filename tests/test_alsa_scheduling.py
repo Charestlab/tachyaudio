@@ -158,15 +158,15 @@ class AlsaWorkerTests(unittest.TestCase):
         self.assertEqual(stream.status()["queued"], 0)
 
     @retry_if_worker_starved
-    def test_back_to_back_accepted_overlap_rejected(self):
+    def test_back_to_back_and_overlap_accepted(self):
         stream = self.open()
         target = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + 150_000_000
         first = stream.schedule(array("f", [0.1, 0.1] * 1000), target, 50_000_000)
-        with self.assertRaisesRegex(ValueError, "overlaps"):
-            stream.schedule(array("f", [0.1, 0.1] * 10), target + 10_000_000, 50_000_000)
+        overlapping = stream.schedule(array("f", [0.1, 0.1] * 10),
+                                      target + 10_000_000, 50_000_000)
         second = stream.schedule(array("f", [0.1, 0.1] * 1000),
                                  target + round(1000 * 1e9 / 48000), 50_000_000)
-        for stimulus in (first, second):
+        for stimulus in (first, overlapping, second):
             self.assertEqual(self.wait_result(stream, stimulus)["state"], 4)
         gap = (stream.result(second)["predicted_onset_ns"]
                - stream.result(first)["predicted_end_ns"])
@@ -196,13 +196,12 @@ class AlsaWorkerTests(unittest.TestCase):
         stream.cancel()
         self.assertEqual(stream.status()["queued"], 0)
 
-    def test_cancel_overlap_and_close(self):
+    def test_cancel_and_close(self):
         stream = self.open()
         frames = array("f", [0, 0])
         target = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + 500_000_000
         stream.schedule(frames, target)
-        with self.assertRaises(ValueError):
-            stream.schedule(frames, target)
+        stream.schedule(frames, target)      # overlapping: now accepted (mixed)
         stream.cancel()
         self.assertEqual(stream.status()["state"], 5)
         stream.close()

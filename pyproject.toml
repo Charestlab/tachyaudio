@@ -31,11 +31,18 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+tachyaudio-audio-report = "tachyaudio.audio_report:main"
+
 [project.optional-dependencies]
+report = [
+  "numpy>=1.21",
+]
 dev = [
   "build>=1.2",
   "mypy>=1.10",
   "ruff>=0.5",
+  "numpy>=1.21",
 ]
 
 [tool.setuptools.packages.find]

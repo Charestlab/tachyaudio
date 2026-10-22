@@ -36,8 +36,8 @@ class NativePlaybackTests(unittest.TestCase):
         with ta.ScheduledOutputStream(channels=1) as stream:
             target = time.monotonic() + 1
             stream.schedule(array("f", [0.0]) * 480, when=target)
-            with self.assertRaisesRegex(ValueError, "overlaps"):
-                stream.schedule(array("f", [0.0]), when=target + 0.001)
+            # Overlapping stimuli are mixed, not rejected.
+            stream.schedule(array("f", [0.0]), when=target + 0.001)
             stream.cancel()
             with self.assertRaises(CancelledError):
                 stream.wait(timeout=1)

@@ -16,8 +16,11 @@ from tachyaudio._stream import (
     play,
 )
 from tachyaudio._version import __version__
+from tachyaudio.tuning import FastSettings, fastest_safe_settings
 
 __all__ = [
+    "FastSettings",
+    "fastest_safe_settings",
     "AlsaOutput",
     "BackendUnavailable",
     "DeviceInfo",

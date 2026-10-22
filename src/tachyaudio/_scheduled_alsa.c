@@ -404,6 +404,12 @@ static void *alsa_worker(void *context)
                         value <= -1 ? INT16_MIN : (int16_t)lrintf(value * 32768.0f);
                 }
                 output = self->integer_output;
+            } else {
+                /* Float output: clamp the mixed buffer so overlapping sums stay in [-1, 1]. */
+                for (size_t index = 0; index < self->period * self->channels; index++) {
+                    float value = self->output[index];
+                    self->output[index] = value > 1.0f ? 1.0f : (value < -1.0f ? -1.0f : value);
+                }
             }
             long written = self->api.writei(self->pcm, output, self->period);
             uint64_t completed = alsa_now();
@@ -727,18 +733,12 @@ static PyObject *alsa_schedule(AlsaScheduled *self, PyObject *args)
         problem = "stream is not running (closed, failed or not started)";
     else if (target <= now || target - now < lead)
         problem = "insufficient advance notice";
-    /* Back-to-back stimuli (within half a sample) are accepted; overlaps are not. */
-    double sample_ns = 1e9 / self->rate, duration_ns = count * sample_ns, tolerance = sample_ns / 2;
+    /* Overlapping stimuli are allowed: the render loop mixes active slots additively. */
     AlsaStimulus *slot = NULL;
     for (int index = 0; index < TACHY_ALSA_QUEUE && !problem; index++) {
         AlsaStimulus *stimulus = &self->stimuli[index];
-        if (alsa_active(stimulus)) {
-            double start = (double)stimulus->requested, end = start + stimulus->frames * sample_ns;
-            if ((double)target + tolerance < end && start + tolerance < (double)target + duration_ns)
-                problem = "overlaps a stimulus already scheduled on this stream";
-        } else if (!slot || stimulus->id < slot->id) {
+        if (!alsa_active(stimulus) && (!slot || stimulus->id < slot->id))
             slot = stimulus;
-        }
     }
     if (!problem && !slot) problem = "too many stimuli queued (32)";
     if (problem) {
