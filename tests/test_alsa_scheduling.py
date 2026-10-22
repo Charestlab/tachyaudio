@@ -37,10 +37,16 @@ def retry_if_worker_starved(test):
             self.fake.tachy_fake_reset_max_status_gap()
             try:
                 return test(self)
-            except AssertionError as error:
+            except (AssertionError, ValueError, RuntimeError) as error:
+                # Starvation can also fault the stream, surfacing as a ValueError
+                # ("stream is not running") or RuntimeError rather than a bad
+                # assertion; treat all three the same, still gated on the gap so a
+                # genuine failure (small gap) is re-raised immediately.
                 gap = self.fake.tachy_fake_max_status_gap_ns()
                 if gap < STARVED_GAP_NS:
-                    raise AssertionError(f"{error} (longest worker gap {gap / 1e6:.1f} ms)") from error
+                    raise type(error)(
+                        f"{error} (longest worker gap {gap / 1e6:.1f} ms)"
+                    ) from error
                 gaps.append(gap / 1e6)
                 self.doCleanups()
         self.skipTest("host descheduled the worker on every attempt: "

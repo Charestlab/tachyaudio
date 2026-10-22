@@ -311,6 +311,7 @@ static OSStatus tachy_scheduled_render(
         atomic_store_explicit(&self->max_delay_ns, delay, memory_order_relaxed);
     atomic_fetch_add_explicit(&self->observations, 1, memory_order_release);
     int states[TACHY_CORE_QUEUE] = {0};
+    int contributors = 0;
     UInt64 first_written_ns = UINT64_MAX;
     for (int i = 0; i < TACHY_CORE_QUEUE; i++) {
         TachyCoreStimulus *slot = &self->stimuli[i];
@@ -321,6 +322,7 @@ static OSStatus tachy_scheduled_render(
                                          output_time, self, slot);
         if (states[i] >= TACHY_SCHEDULE_CLOCK_ERROR) { fault = states[i]; break; }
         if (slot->position > before) {
+            contributors++;
             UInt64 first = state == TACHY_SCHEDULE_PENDING ? slot->predicted_onset_ns : beginning;
             if (first < first_written_ns) first_written_ns = first;
         }
@@ -333,13 +335,15 @@ static OSStatus tachy_scheduled_render(
             memset(output->mBuffers[i].mData, 0, output->mBuffers[i].mDataByteSize);
         tachy_core_fail(self, fault, beginning);
     } else {
-        // Mixed sums of overlapping stimuli can exceed [-1, 1]; clamp to avoid wrap.
-        for (UInt32 b = 0; b < output->mNumberBuffers; b++) {
-            float *d = output->mBuffers[b].mData;
-            UInt32 n = output->mBuffers[b].mDataByteSize / sizeof(float);
-            for (UInt32 k = 0; k < n; k++)
-                d[k] = d[k] > 1.0f ? 1.0f : (d[k] < -1.0f ? -1.0f : d[k]);
-        }
+        // Only overlapping stimuli can sum past [-1, 1]; clamp just when they mixed,
+        // leaving single-stimulus playback exactly as it was before mixing existed.
+        if (contributors > 1)
+            for (UInt32 b = 0; b < output->mNumberBuffers; b++) {
+                float *d = output->mBuffers[b].mData;
+                UInt32 n = output->mBuffers[b].mDataByteSize / sizeof(float);
+                for (UInt32 k = 0; k < n; k++)
+                    d[k] = d[k] > 1.0f ? 1.0f : (d[k] < -1.0f ? -1.0f : d[k]);
+            }
         for (int i = 0; i < TACHY_CORE_QUEUE; i++)
             if (states[i]) atomic_store_explicit(&self->stimuli[i].state, states[i], memory_order_release);
     }

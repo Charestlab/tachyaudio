@@ -348,7 +348,7 @@ static void *alsa_worker(void *context)
                 }
             }
             memset(self->output, 0, self->period * self->channels * sizeof(float));
-            int late = 0;
+            int late = 0, contributors = 0;
             for (int index = 0; index < TACHY_ALSA_QUEUE && !late; index++) {
                 AlsaStimulus *stimulus = &self->stimuli[index];
                 stimulus->count = 0;
@@ -381,6 +381,7 @@ static void *alsa_worker(void *context)
                     destination[sample] += source[sample];
                 stimulus->offset = offset;
                 stimulus->count = count;
+                if (count) contributors++;
             }
             if (late) {
                 alsa_fail(self, TACHY_SCHEDULE_CALLBACK_LATE);
@@ -404,8 +405,9 @@ static void *alsa_worker(void *context)
                         value <= -1 ? INT16_MIN : (int16_t)lrintf(value * 32768.0f);
                 }
                 output = self->integer_output;
-            } else {
-                /* Float output: clamp the mixed buffer so overlapping sums stay in [-1, 1]. */
+            } else if (contributors > 1) {
+                /* Float output: clamp only when stimuli actually overlapped and summed;
+                   a single stimulus passes through untouched, as before mixing existed. */
                 for (size_t index = 0; index < self->period * self->channels; index++) {
                     float value = self->output[index];
                     self->output[index] = value > 1.0f ? 1.0f : (value < -1.0f ? -1.0f : value);
