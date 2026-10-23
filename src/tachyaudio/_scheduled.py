@@ -29,14 +29,25 @@ class ScheduledTiming:
     render_complete_ns: int
     predicted_end_ns: int
     rendered_frames: int
+    immediate: bool = False
 
     @property
     def predicted_error_seconds(self) -> float:
+        if self.immediate:
+            raise ValueError("immediate playback has no deadline; use submission_to_onset_seconds")
+        return (self.predicted_onset_ns - self.requested_ns) / 1e9
+
+
+    @property
+    def submission_to_onset_seconds(self) -> float:
+        """For immediate playback, delay from native submission to estimated onset."""
+        if not self.immediate:
+            raise ValueError("only available for immediate playback")
         return (self.predicted_onset_ns - self.requested_ns) / 1e9
 
 
 class ScheduledOutputStream:
-    """Opt-in native scheduler for up to 32 non-overlapping finite stimuli.
+    """Opt-in native scheduler for up to 32 finite stimuli, mixed if they overlap.
 
     macOS uses Core Audio output timestamps on the device's current
     configuration. Linux opens an explicit ALSA ``hw:`` device directly
@@ -59,8 +70,9 @@ class ScheduledOutputStream:
         derived from native output timestamps/delay after ``start()`` (see
         ``lead_time``).
     latency:
-        Requested device buffer in seconds. Linux: ``None`` chooses 5 ms
-        with real-time priority, otherwise 20 ms. macOS: ``None`` preserves
+        Requested device buffer in seconds. Linux: ``None`` chooses, with
+        real-time priority, 2 ms for a PCI card (onboard HDA) and 5 ms for USB
+        or other buses; without it 20 ms. macOS: ``None`` preserves
         the current HAL buffer; an explicit value changes the SHARED device
         buffer and restores it on close if it still matches this stream's
         setting. Avoid concurrent streams with different explicit settings.
@@ -94,8 +106,9 @@ class ScheduledOutputStream:
         if latency is not None:
             if sys.platform not in ("darwin", "linux"):
                 raise ValueError("latency requires the Core Audio or ALSA scheduler")
-            if not math.isfinite(latency) or not 0.001 <= latency <= 1.0:
-                raise ValueError("latency must be between 0.001 and 1.0 seconds")
+            lower = 0.000001 if sys.platform == "darwin" else 0.001
+            if not math.isfinite(latency) or not lower <= latency <= 1.0:
+                raise ValueError(f"latency must be between {lower} and 1.0 seconds")
         try:
             if sys.platform.startswith("linux"):
                 from tachyaudio import _scheduled_alsa as _native
@@ -146,9 +159,10 @@ class ScheduledOutputStream:
         """Copy a whole float32 stimulus ahead of an absolute monotonic deadline.
 
         Returns the stimulus id for ``wait``/``cancel``. Up to 32 stimuli
-        can be queued ahead on macOS and Linux, back to back if desired.
-        A stimulus overlapping one already queued, or due sooner than
-        ``lead_time``, is rejected. Python does not need to run again at onset.
+        can be queued ahead on macOS and Linux, back to back or overlapping:
+        stimuli that overlap in time are summed and clamped to [-1, 1]. A
+        stimulus due sooner than ``lead_time`` is rejected. Python does not
+        need to run again at onset.
         A stimulus whose onset can no longer be met is dropped and reported by
         ``wait`` rather than played late.
         """
@@ -162,8 +176,28 @@ class ScheduledOutputStream:
         if target_ns - time.monotonic_ns() < lead_ns:
             raise SchedulingError("insufficient advance notice for scheduled onset")
         view, _, _ = _validate_frames(frames, self.config.channels)
-        stimulus = self._handle.schedule(view, target_ns, lead_ns)
+        try:
+            stimulus = self._handle.schedule(view, target_ns, lead_ns)
+        except ValueError as error:
+            # Normalize deadlines missed during the native copy.
+            if "insufficient advance notice" in str(error):
+                raise SchedulingError("insufficient advance notice for scheduled onset") from error
+            raise
         self._latest = stimulus
+        return self._latest
+
+    def schedule_asap(self, frames: Any) -> int:
+        """macOS: copy a sound, then render at the next available callback.
+
+        Requires an idle stream. No Python deadline or lead margin is imposed;
+        onset varies with callback phase. Use schedule(when=...) for alignment
+        to a predetermined time. Device latency still applies.
+        """
+        self._require_open()
+        if sys.platform != "darwin":
+            raise BackendUnavailable("callback-driven immediate playback currently requires macOS")
+        view, _, _ = _validate_frames(frames, self.config.channels)
+        self._latest = self._handle.schedule(view, time.monotonic_ns(), 0, True)
         return self._latest
 
     @property
@@ -233,7 +267,8 @@ class ScheduledOutputStream:
             status = self._record(stimulus)
             state = status["state"]
             if state == 4:
-                return ScheduledTiming(**{name: status[name] for name in (
+                return ScheduledTiming(immediate=bool(status.get("immediate", False)),
+                                       **{name: status[name] for name in (
                     "requested_ns", "predicted_onset_ns", "render_callback_ns",
                     "render_complete_ns",
                     "predicted_end_ns", "rendered_frames",

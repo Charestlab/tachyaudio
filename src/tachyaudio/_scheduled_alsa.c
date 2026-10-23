@@ -41,10 +41,13 @@ enum {
 /* USB delay reports are ~1 ms early for the first few ms after start. */
 #define TACHY_ALSA_FIT_SETTLE_NS 20000000ULL
 
-/* Automatic buffer sizes, from acoustic-loopback runs under full CPU load: with
- * RT priority 5 ms (and 3 ms) never failed; without it 5 and 10 ms faulted and
- * 20 ms did not. */
-#define TACHY_ALSA_BUFFER_RT_US 5000
+/* Automatic buffer sizes, from runs under full CPU load. USB (acoustic
+ * loopback, HyperX headset): with RT priority 5 and 4 ms never failed, 3 ms
+ * dropped stimuli and 2 ms faulted at once. PCI/HDA (onboard ALC897, 300
+ * stimuli per setting at 48 and 192 kHz): 2 ms never failed, 1-1.5 ms
+ * occasionally dropped one. Without RT, 5 and 10 ms faulted and 20 ms did not. */
+#define TACHY_ALSA_BUFFER_RT_USB_US 5000
+#define TACHY_ALSA_BUFFER_RT_US 2000
 #define TACHY_ALSA_BUFFER_NORMAL_US 20000
 
 typedef struct {
@@ -92,6 +95,7 @@ typedef struct {
     pthread_t thread;
     pthread_mutex_t lock;
     int lock_ready, running, stopping, closed, fault, fault_state, sample_format, rt_priority, buffer_automatic;
+    int starting; /* start() is promoting the worker with the GIL released */
     const char *rt_method;
     pid_t worker_tid;
     unsigned int rate, channels, input_channels;
@@ -344,7 +348,7 @@ static void *alsa_worker(void *context)
                 }
             }
             memset(self->output, 0, self->period * self->channels * sizeof(float));
-            int late = 0;
+            int late = 0, contributors = 0;
             for (int index = 0; index < TACHY_ALSA_QUEUE && !late; index++) {
                 AlsaStimulus *stimulus = &self->stimuli[index];
                 stimulus->count = 0;
@@ -377,6 +381,7 @@ static void *alsa_worker(void *context)
                     destination[sample] += source[sample];
                 stimulus->offset = offset;
                 stimulus->count = count;
+                if (count) contributors++;
             }
             if (late) {
                 alsa_fail(self, TACHY_SCHEDULE_CALLBACK_LATE);
@@ -400,6 +405,13 @@ static void *alsa_worker(void *context)
                         value <= -1 ? INT16_MIN : (int16_t)lrintf(value * 32768.0f);
                 }
                 output = self->integer_output;
+            } else if (contributors > 1) {
+                /* Float output: clamp only when stimuli actually overlapped and summed;
+                   a single stimulus passes through untouched, as before mixing existed. */
+                for (size_t index = 0; index < self->period * self->channels; index++) {
+                    float value = self->output[index];
+                    self->output[index] = value > 1.0f ? 1.0f : (value < -1.0f ? -1.0f : value);
+                }
             }
             long written = self->api.writei(self->pcm, output, self->period);
             uint64_t completed = alsa_now();
@@ -463,6 +475,16 @@ static PyObject *alsa_close(AlsaScheduled *self, PyObject *ignored)
     pthread_mutex_unlock(&self->lock);
     if (self->running) {
         Py_BEGIN_ALLOW_THREADS
+        /* A concurrent start() may still use the worker's thread handle; let it
+         * return before joining (it stops waiting once stopping is set). */
+        for (;;) {
+            pthread_mutex_lock(&self->lock);
+            int starting = self->starting;
+            pthread_mutex_unlock(&self->lock);
+            if (!starting) break;
+            struct timespec pause = {0, 1000000};
+            nanosleep(&pause, NULL);
+        }
         pthread_join(self->thread, NULL);
         Py_END_ALLOW_THREADS
         self->running = 0;
@@ -488,6 +510,31 @@ static void alsa_dealloc(AlsaScheduled *self)
 static void alsa_quiet(const char *file, int line, const char *function, int error, const char *format, ...)
 {
     (void)file; (void)line; (void)function; (void)error; (void)format;
+}
+
+/* True only for a card on the PCI bus (onboard HDA, PCIe interfaces), the case
+ * validated with a 2 ms buffer. USB keeps frames in flight beyond the ring, and
+ * other or unknown buses keep the larger, USB-validated buffer. */
+static int alsa_device_on_pci(void *library, const char *device)
+{
+    int (*card_index)(const char *) = (int (*)(const char *))dlsym(library, "snd_card_get_index");
+    if (!card_index || strncmp(device, "hw:", 3) != 0) return 0;
+    const char *start = device + 3;
+    if (strncmp(start, "CARD=", 5) == 0) start += 5;
+    size_t length = strcspn(start, ",");
+    char card[64];
+    if (length == 0 || length >= sizeof(card)) return 0;
+    memcpy(card, start, length);
+    card[length] = '\0';
+    int index = card_index(card);
+    if (index < 0) return 0;
+    char path[96], bus[256];
+    snprintf(path, sizeof(path), "/sys/class/sound/card%d/device/subsystem", index);
+    ssize_t size = readlink(path, bus, sizeof(bus) - 1);
+    if (size <= 0) return 0;
+    bus[size] = '\0';
+    const char *name = strrchr(bus, '/');
+    return name && strcmp(name, "/pci") == 0;
 }
 
 static int alsa_configure(AlsaScheduled *self, unsigned int channels, unsigned int buffer_us)
@@ -518,13 +565,11 @@ static PyObject *alsa_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
         PyErr_SetString(PyExc_ValueError, "ALSA scheduling requires device_id='hw:CARD,DEVICE', positive rate, 1-32 channels and a 1-1000 ms buffer");
         return NULL;
     }
-    int automatic = buffer_us == 0;
+    int automatic = buffer_us == 0, realtime = 0;
     if (automatic) {
-        int realtime;
         Py_BEGIN_ALLOW_THREADS
         realtime = alsa_realtime_available();
         Py_END_ALLOW_THREADS
-        buffer_us = realtime ? TACHY_ALSA_BUFFER_RT_US : TACHY_ALSA_BUFFER_NORMAL_US;
     }
     AlsaScheduled *self = (AlsaScheduled *)type->tp_alloc(type, 0);
     if (!self) return NULL;
@@ -546,6 +591,10 @@ static PyObject *alsa_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
     LOAD_ALSA(status_get_state); LOAD_ALSA(status_get_avail); LOAD_ALSA(status_get_delay);
     LOAD_ALSA(status_get_htstamp);
 #undef LOAD_ALSA
+    if (automatic) {
+        buffer_us = !realtime ? TACHY_ALSA_BUFFER_NORMAL_US :
+            alsa_device_on_pci(self->library, device) ? TACHY_ALSA_BUFFER_RT_US : TACHY_ALSA_BUFFER_RT_USB_US;
+    }
     if (self->api.open(&self->pcm, device, 0, 1) < 0) goto failure;
     /* Rejected format/channel attempts are expected; keep libasound from
      * printing them, then restore its default error handler. */
@@ -621,6 +670,9 @@ static PyObject *alsa_start(AlsaScheduled *self, PyObject *ignored)
         return NULL;
     }
     self->running = 1;
+    pthread_mutex_lock(&self->lock);
+    self->starting = 1;
+    pthread_mutex_unlock(&self->lock);
     const char *method = "none";
     int priority;
     Py_BEGIN_ALLOW_THREADS
@@ -629,7 +681,7 @@ static PyObject *alsa_start(AlsaScheduled *self, PyObject *ignored)
      * precisely as a later one. */
     for (int attempt = 0; attempt < 250; attempt++) {
         pthread_mutex_lock(&self->lock);
-        int ready = self->fault || self->fit_count >= TACHY_ALSA_FIT_MINIMUM;
+        int ready = self->fault || self->stopping || self->fit_count >= TACHY_ALSA_FIT_MINIMUM;
         pthread_mutex_unlock(&self->lock);
         if (ready) break;
         struct timespec pause = {0, 1000000};
@@ -639,6 +691,7 @@ static PyObject *alsa_start(AlsaScheduled *self, PyObject *ignored)
     pthread_mutex_lock(&self->lock);
     self->rt_priority = priority;
     self->rt_method = method;
+    self->starting = 0;
     pthread_mutex_unlock(&self->lock);
     Py_RETURN_NONE;
 }
@@ -682,18 +735,12 @@ static PyObject *alsa_schedule(AlsaScheduled *self, PyObject *args)
         problem = "stream is not running (closed, failed or not started)";
     else if (target <= now || target - now < lead)
         problem = "insufficient advance notice";
-    /* Back-to-back stimuli (within half a sample) are accepted; overlaps are not. */
-    double sample_ns = 1e9 / self->rate, duration_ns = count * sample_ns, tolerance = sample_ns / 2;
+    /* Overlapping stimuli are allowed: the render loop mixes active slots additively. */
     AlsaStimulus *slot = NULL;
     for (int index = 0; index < TACHY_ALSA_QUEUE && !problem; index++) {
         AlsaStimulus *stimulus = &self->stimuli[index];
-        if (alsa_active(stimulus)) {
-            double start = (double)stimulus->requested, end = start + stimulus->frames * sample_ns;
-            if ((double)target + tolerance < end && start + tolerance < (double)target + duration_ns)
-                problem = "overlaps a stimulus already scheduled on this stream";
-        } else if (!slot || stimulus->id < slot->id) {
+        if (!alsa_active(stimulus) && (!slot || stimulus->id < slot->id))
             slot = stimulus;
-        }
     }
     if (!problem && !slot) problem = "too many stimuli queued (32)";
     if (problem) {

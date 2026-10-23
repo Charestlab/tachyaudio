@@ -13,3 +13,11 @@ build/
 dist/
 *.egg-info/
 
+# Generated audio-report / comparison artifacts (tachyaudio-audio-report, ptb_compare)
+ptb_report.json
+comparison.json
+immediate.json
+linux-audio.json
+native-timing.json
+acoustic-timing.json
+

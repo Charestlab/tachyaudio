@@ -20,6 +20,40 @@ class CoreQueueTests(unittest.TestCase):
         return [list(memoryview(b).cast('f')) for b in
                 self.stream._render_test(self.begin, frames, callbacks, gap)]
 
+    def test_immediate_uses_first_callback_even_after_submission_time(self):
+        submitted = time.monotonic_ns()
+        ident = self.stream.schedule(array('f', [.25]*10), submitted, 0, True)
+        buffers = self.render()
+        self.assertEqual(buffers[0], [.25]*16)
+        self.assertEqual(buffers[1], [.25]*4 + [0]*12)
+        result = self.stream.result(ident)
+        self.assertTrue(result['immediate'])
+        self.assertEqual(result['requested_ns'], submitted)
+        self.assertAlmostEqual(result['predicted_onset_ns'], self.begin, delta=42)
+        self.assertEqual(result['state'], 4)
+
+    def test_immediate_reserves_pending_and_rendered_audio(self):
+        ident = self.stream.schedule(array('f', [.25]), time.monotonic_ns(), 0, True)
+        for rendered in (False, True):
+            if rendered:
+                self.render(callbacks=1)
+            with self.assertRaisesRegex(ValueError, 'idle stream'):
+                self.stream.schedule(array('f', [.5]), time.monotonic_ns(), 0, True)
+            with self.assertRaisesRegex(ValueError, 'idle stream'):
+                self.submit([.5], 100)
+        self.assertEqual(self.stream.result(ident)['state'], 4)
+
+    def test_immediate_does_not_displace_a_scheduled_stimulus(self):
+        self.submit([.25], 100)
+        with self.assertRaisesRegex(ValueError, 'idle stream'):
+            self.stream.schedule(array('f', [.5]), time.monotonic_ns(), 0, True)
+
+    def test_pending_immediate_cancellation_leaves_silence(self):
+        ident = self.stream.schedule(array('f', [.25]), time.monotonic_ns(), 0, True)
+        self.stream.cancel(ident)
+        self.assertTrue(all(v == 0 for b in self.render() for v in b))
+        self.assertEqual(self.stream.result(ident)['state'], 5)
+
     def test_queue_back_to_back_in_same_buffer_mono_duplicates(self):
         first = self.submit([.25] * 4)
         second = self.submit([.5] * 4, 4)
@@ -51,10 +85,8 @@ class CoreQueueTests(unittest.TestCase):
         self.assertEqual(self.stream.result(kept)['state'], 4)
         self.assertEqual(self.stream.status()['state'], 4)
 
-    def test_capacity_overlap_invalid_samples_and_unknown_id(self):
+    def test_capacity_invalid_samples_and_unknown_id(self):
         self.submit([.25] * 4)
-        with self.assertRaisesRegex(ValueError, 'overlaps'):
-            self.submit([.5], 1)
         for offset in range(1, 32):
             self.submit([0], offset * 10)
         with self.assertRaisesRegex(ValueError, 'too many'):
@@ -83,11 +115,26 @@ class CoreQueueTests(unittest.TestCase):
             self.assertEqual(self.stream.result(ident)['state'], 5)
         self.stream.close()
 
-    def test_result_reservation_prevents_overlap_after_render(self):
+    def test_overlapping_stimuli_mix(self):
+        a = self.submit([.25] * 4)        # frames 0-3
+        b = self.submit([.5] * 4)         # same onset: overlaps a fully
+        buffers = self.render()
+        # mono duplicated to 2 device channels; the two stimuli sum to .75
+        self.assertEqual(buffers[0], [.75] * 8 + [0] * 8)
+        for ident in (a, b):
+            self.assertEqual(self.stream.result(ident)['state'], 4)
+
+    def test_overlapping_mix_is_clamped(self):
+        self.submit([.8] * 4)
+        self.submit([.8] * 4)             # same onset: sum 1.6 clamps to 1.0
+        buffers = self.render()
+        self.assertEqual(buffers[0], [1.0] * 8 + [0] * 8)
+
+    def test_overlap_allowed_after_render(self):
         self.submit([.25] * 4)
         self.render(callbacks=1)
-        with self.assertRaisesRegex(ValueError, 'overlaps'):
-            self.submit([.5], 1)
+        # previously rejected as an overlap; now accepted (mixed)
+        self.assertIsNotNone(self.submit([.5], 1))
 
     def test_diagnostics_observe_device_timestamps(self):
         self.render()
