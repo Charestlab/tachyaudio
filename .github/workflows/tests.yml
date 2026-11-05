@@ -45,7 +45,7 @@ jobs:
 
   macos:
     name: macOS Python ${{ matrix.python-version }}
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
