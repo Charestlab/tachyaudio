@@ -7,6 +7,22 @@ public APIs may still change while the backend design stabilizes.
 
 ## [Unreleased]
 
+## [0.2.0b4] - 2026-11-05
+
+### Added
+
+- Windows native scheduling through shared-mode, event-driven WASAPI with
+  device-clock/QPC timestamps, queued and overlapping stimuli, cancellation,
+  explicit device selection, and missed-onset reporting.
+- Windows scheduling documentation and deterministic native tests.
+
+### Notes
+
+- Windows uses the endpoint's float32 mix rate and default shared-engine period.
+  Older Python monotonic clocks can quantize caller deadlines to system ticks.
+  Device-clock estimates have not been validated against wired physical onset.
+
+
 ## [0.2.0b3] - 2026-10-22
 
 ### Changed
