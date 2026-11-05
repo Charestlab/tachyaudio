@@ -7,7 +7,7 @@ device clock, so Python does not need to run at onset. Ordinary tachyaudio
 streams and tachypy's default `timing_mode="software"` do not use it (see the
 README, "Linux: which audio path is used").
 
-Status: experimental, validated on Ubuntu 24.04 (see [Validation](#validation)).
+Direct ALSA scheduling, validated on Ubuntu 24.04 (see [Validation](#validation)).
 Until the next release, install tachyaudio from source (`pip install -e .`);
 0.2.0b2 does not include it.
 

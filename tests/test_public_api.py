@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from importlib.metadata import version
 
 import tachyaudio as ta
 
@@ -11,6 +12,7 @@ class PublicApiTests(unittest.TestCase):
 
     def test_version_is_exposed(self) -> None:
         self.assertIsInstance(ta.__version__, str)
+        self.assertEqual(ta.__version__, version("tachyaudio"))
 
     def test_default_backend_lists_no_devices(self) -> None:
         self.assertIsInstance(ta.list_devices(), tuple)

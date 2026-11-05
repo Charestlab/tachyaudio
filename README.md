@@ -1,11 +1,11 @@
 # tachyaudio
 
-`tachyaudio` is a low-level audio package intended to replace tachypy’s direct
-dependency on `sounddevice`/PortAudio over time.
+`tachyaudio` provides the low-level audio backend for TachyPy and Python
+experiments without requiring PortAudio.
 
-Status: beta. Ordinary streams use Core Audio on macOS, vendored `miniaudio`
+Status: 1.0 public API. Ordinary streams use Core Audio on macOS, vendored `miniaudio`
 on Linux (PulseAudio/PipeWire first, ALSA as fallback) and vendored `miniaudio`
-with WASAPI on Windows. Experimental device-clock scheduling
+with WASAPI on Windows. Device-clock scheduling
 (`ScheduledOutputStream`) is available on macOS (Core Audio) and Linux (direct
 ALSA), and on [Windows (WASAPI shared mode)](docs/windows-scheduling.md).
 See [Linux: which audio path is used](#linux-which-audio-path-is-used).
@@ -141,3 +141,6 @@ interactive desktop login. If `tachyaudio.list_devices()` returns an empty tuple
 or unexpected devices in a sandboxed environment, verify from an unsandboxed
 terminal before debugging the backend. Headless Linux containers may return no
 devices while still being able to build and import the native extension.
+
+The public API follows semantic versioning from 1.0; see
+[API stability and supported behavior](docs/api-stability.md).

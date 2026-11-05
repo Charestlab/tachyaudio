@@ -1,4 +1,4 @@
-# Windows native scheduling development
+# Windows native scheduling
 
 Windows supports device-clock playback through `ScheduledOutputStream` and
 TachyPy's explicit `Audio(timing_mode="native")`. The scheduler uses WASAPI

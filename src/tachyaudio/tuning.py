@@ -44,10 +44,12 @@ def _probe(device_id, sample_rate, channels, latency, workers, rounds, per_round
     silence = array("f", [0.0]) * (_PROBE_FRAMES * channels)
     ctx = mp.get_context("spawn")
     procs = [ctx.Process(target=_cpu_burn, daemon=True) for _ in range(workers)]
-    for p in procs:
-        p.start()
+    started = []
     glitches, lead = 0, 0.0
     try:
+        for p in procs:
+            p.start()
+            started.append(p)
         with ScheduledOutputStream(sample_rate=sample_rate, channels=channels,
                                    device_id=device_id, latency=latency) as stream:
             lead = stream.lead_time
@@ -69,9 +71,9 @@ def _probe(device_id, sample_rate, channels, latency, workers, rounds, per_round
                     glitches += 1
                     break
     finally:
-        for p in procs:
+        for p in started:
             p.terminate()
-        for p in procs:
+        for p in started:
             p.join(1)
     return glitches == 0, lead
 

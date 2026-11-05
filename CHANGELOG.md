@@ -2,10 +2,32 @@
 
 All notable changes to `tachyaudio` will be documented in this file.
 
-The project follows semantic versioning once releases begin. During `0.x`,
-public APIs may still change while the backend design stabilizes.
+From 1.0, the documented public API follows semantic versioning. Historical
+0.x releases preceded this compatibility commitment.
 
 ## [Unreleased]
+
+## [1.0.0] - Unreleased
+
+### Changed
+
+- Establish the documented public API as the 1.x compatibility boundary.
+- Require at least 90% combined Python statement/branch coverage in every
+  platform/Python CI job, including diagnostics and tuning; no runtime modules
+  are excluded. Native C behavior continues to use the existing deterministic
+  renderer and simulated ALSA worker tests.
+
+### Fixed
+
+- Close playback, capture, and duplex streams if context-manager startup fails.
+- Release a native scheduled stream if Windows clock correlation fails.
+- Clean up previously started tuning workers if a later worker cannot start.
+
+### Added
+
+- Deterministic tests for ALSA enumeration, native backend adapters, scheduling
+  clocks and faults, synthetic chirp detection/reporting, silent tuning probes,
+  configuration validation, and resource cleanup.
 
 ## [0.2.0b4] - 2026-11-05
 
