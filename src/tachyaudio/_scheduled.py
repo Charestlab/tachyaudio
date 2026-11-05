@@ -1,4 +1,4 @@
-"""Experimental finite-stimulus scheduling using native playback timestamps."""
+"""Finite-stimulus scheduling using native playback timestamps."""
 
 from __future__ import annotations
 
@@ -164,9 +164,13 @@ class ScheduledOutputStream:
             ) from error
         self._closed = False
         self._latest: int | None = None
-        self._clock_offset_ns, self._clock_guard_ns = (
-            _wasapi_clock_offset() if sys.platform == "win32" else (0, 0)
-        )
+        try:
+            self._clock_offset_ns, self._clock_guard_ns = (
+                _wasapi_clock_offset() if sys.platform == "win32" else (0, 0)
+            )
+        except BaseException:
+            self.close()
+            raise
 
     def _scheduler_now_ns(self) -> int:
         return time.perf_counter_ns() if sys.platform == "win32" else time.monotonic_ns()
@@ -254,7 +258,7 @@ class ScheduledOutputStream:
                      + self._clock_guard_ns / 1e9)
 
     def status(self) -> dict[str, Any]:
-        """Return experimental native status and diagnostic counters."""
+        """Return native diagnostic counters; their dictionary schema is provisional."""
         return dict(self._handle.status())
 
     @property

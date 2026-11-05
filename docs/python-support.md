@@ -25,7 +25,7 @@ The native extension currently uses the regular CPython C API. That means wheel
 builds are per-CPython-version. Moving to Python’s stable ABI can be evaluated
 later, but only after the native API settles.
 
-For the public beta, `tachyaudio` intentionally ships per-version CPython
+For the 1.x releases, `tachyaudio` intentionally ships per-version CPython
 wheels (`cp310` through `cp314`) rather than `abi3` wheels. This keeps the
 native backend implementation unconstrained while macOS and Linux playback,
 capture, duplex streams, and diagnostics are still evolving. The additional

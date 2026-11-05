@@ -21,3 +21,7 @@ linux-audio.json
 native-timing.json
 acoustic-timing.json
 
+
+.coverage
+coverage.xml
+htmlcov/

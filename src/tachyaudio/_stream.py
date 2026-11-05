@@ -227,7 +227,11 @@ class OutputStream:
         self._closed = False
 
     def __enter__(self) -> OutputStream:
-        self.start()
+        try:
+            self.start()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -378,7 +382,11 @@ class InputStream:
         self._closed = False
 
     def __enter__(self) -> InputStream:
-        self.start()
+        try:
+            self.start()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
@@ -482,7 +490,11 @@ class DuplexStream:
         self._closed = False
 
     def __enter__(self) -> DuplexStream:
-        self.start()
+        try:
+            self.start()
+        except BaseException:
+            self.close()
+            raise
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:

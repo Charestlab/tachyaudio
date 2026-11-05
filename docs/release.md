@@ -3,9 +3,12 @@
 This project publishes platform wheels for supported CPython versions instead
 of `abi3` wheels.
 
-## Beta release flow
+## Release flow
 
-1. Merge the release-prep pull request.
+1. Confirm the public API and supported platforms in `api-stability.md`, pass
+   the 90% Python coverage floor on every CI platform/Python job, and merge the
+   release-prep pull request. Native C tests and hardware timing evidence are
+   separate from the Python coverage percentage.
 2. Tag the merged commit:
 
    ```bash
