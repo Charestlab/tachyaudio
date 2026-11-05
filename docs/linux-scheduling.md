@@ -4,12 +4,12 @@
 `Audio(timing_mode="native")`. It plays through ALSA directly, bypassing
 PulseAudio/PipeWire, and a native real-time thread places each stimulus on the
 device clock, so Python does not need to run at onset. Ordinary tachyaudio
-streams and tachypy's default `timing_mode="software"` do not use it (see the
-README, "Linux: which audio path is used").
+streams and tachypy's `Audio(timing_mode="software")` use the ordinary system
+audio path instead. TachyPy defaults to native timing; see the
+[README class guide](../README.md#core-classes).
 
 Direct ALSA scheduling, validated on Ubuntu 24.04 (see [Validation](#validation)).
-Until the next release, install tachyaudio from source (`pip install -e .`);
-0.2.0b2 does not include it.
+Install TachyAudio with `python -m pip install tachyaudio`.
 
 ## Quick start
 
@@ -152,7 +152,7 @@ measurement floor is 9 µs; the headset itself adds ±50 µs wander, occasional
 
 | mode | jitter std | peak-to-peak |
 |---|---|---|
-| `timing_mode="software"` (default, via PipeWire) | 3.4 ms | 17.1 ms |
+| `timing_mode="software"` (via PipeWire) | 3.4 ms | 17.1 ms |
 | `timing_mode="native"`, all defaults (5 ms buffer chosen) | 69 µs | 230 µs |
 | `timing_mode="native"`, `latency=0.040` | 37 µs | 161 µs |
 
