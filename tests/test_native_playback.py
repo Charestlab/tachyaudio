@@ -12,10 +12,10 @@ import tachyaudio as ta
 
 @unittest.skipUnless(os.environ.get("TACHYAUDIO_TEST_HARDWARE") == "1", "requires audio output")
 class NativePlaybackTests(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "darwin", "macOS device-clock scheduler")
+    @unittest.skipUnless(sys.platform in ("darwin", "win32"), "default-device native scheduler")
     def test_scheduled_render_runs_while_python_holds_the_gil(self) -> None:
         with ta.ScheduledOutputStream(channels=1) as stream:
-            target = time.monotonic() + 0.12
+            target = time.monotonic() + max(0.12, stream.lead_time + 0.05)
             stream.schedule(array("f", [0.0]) * 480, when=target)
             previous = sys.getswitchinterval()
             try:
@@ -31,7 +31,7 @@ class NativePlaybackTests(unittest.TestCase):
             self.assertLess(timing.render_callback_ns, timing.predicted_onset_ns)
             self.assertEqual(timing.rendered_frames, 480)
 
-    @unittest.skipUnless(sys.platform == "darwin", "macOS device-clock scheduler")
+    @unittest.skipUnless(sys.platform in ("darwin", "win32"), "default-device native scheduler")
     def test_scheduled_cancel_overlap_and_reuse(self) -> None:
         with ta.ScheduledOutputStream(channels=1) as stream:
             target = time.monotonic() + 1
@@ -41,8 +41,22 @@ class NativePlaybackTests(unittest.TestCase):
             stream.cancel()
             with self.assertRaises(CancelledError):
                 stream.wait(timeout=1)
-            stream.schedule(array("f", [0.0]), when=time.monotonic() + 0.12)
+            stream.schedule(
+                array("f", [0.0]), when=time.monotonic() + max(0.12, stream.lead_time + 0.05)
+            )
             self.assertEqual(stream.wait(timeout=1).rendered_frames, 1)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows device-clock scheduler")
+    def test_wasapi_explicit_endpoint_and_overlapping_stimuli(self) -> None:
+        default = next(device for device in ta.list_devices()
+                       if device.kind == ta.DeviceKind.OUTPUT and device.is_default)
+        with ta.ScheduledOutputStream(device_id=default.id, channels=1) as stream:
+            target = time.monotonic() + stream.lead_time + 0.1
+            first = stream.schedule(array("f", [0.0]) * 4800, when=target)
+            second = stream.schedule(array("f", [0.0]) * 480, when=target + 0.01)
+            self.assertEqual(stream.wait(stimulus=second, timeout=2).rendered_frames, 480)
+            self.assertEqual(stream.wait(stimulus=first, timeout=2).rendered_frames, 4800)
+            self.assertEqual(stream.status()["clock_source"], "wasapi-audioclock-qpc")
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS queue instrumentation")
     def test_native_timestamps_share_python_clock_and_identify_data_buffer(self) -> None:

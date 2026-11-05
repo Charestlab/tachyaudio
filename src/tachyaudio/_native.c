@@ -3,6 +3,10 @@
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#define COBJMACROS
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <avrt.h>
 #else
 #include <pthread.h>
 #endif
@@ -3614,6 +3618,8 @@ static PyObject *tachy_list_devices(PyObject *self, PyObject *args)
 
 #ifdef __APPLE__
 #include "_scheduled_coreaudio.h"
+#elif defined(_WIN32)
+#include "_scheduled_wasapi.h"
 #endif
 
 static PyObject *tachy_backend_name(PyObject *self, PyObject *args)
@@ -3652,7 +3658,7 @@ PyMODINIT_FUNC PyInit__native(void)
 {
     PyObject *module = NULL;
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     if (PyType_Ready(&TachyScheduledOutputType) < 0) {
         return NULL;
     }
@@ -3693,7 +3699,7 @@ PyMODINIT_FUNC PyInit__native(void)
         return NULL;
     }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
     Py_INCREF(&TachyScheduledOutputType);
     if (PyModule_AddObject(module, "ScheduledOutputStream", (PyObject *)&TachyScheduledOutputType) < 0) {
         Py_DECREF(&TachyScheduledOutputType);
