@@ -142,8 +142,8 @@ Platform setup: [macOS](docs/native-scheduling.md),
 ```python
 import tachyaudio as ta
 
-with ta.InputStream(sample_rate=48_000, channels=1) as microphone:
-    recording = microphone.read_exactly(48_000, timeout=3)
+with ta.InputStream(sample_rate=48000, channels=1) as microphone:
+    recording = microphone.read_exactly(48000, timeout=3)
 
 print(f"Recorded {len(recording) // 4} mono samples")
 ```
