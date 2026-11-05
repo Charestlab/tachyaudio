@@ -63,7 +63,7 @@ from array import array
 
 import tachyaudio as ta
 
-sample_rate = 48_000
+sample_rate = 48000
 frequency = 440
 seconds = 0.25
 
