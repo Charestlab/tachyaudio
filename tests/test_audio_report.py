@@ -87,7 +87,7 @@ class SignalTests(unittest.TestCase):
         ):
             with (
                 self.subTest(platform=platform),
-                patch.object(report.sys, "platform", platform),
+                patch.object(report, "sys", SimpleNamespace(platform=platform)),
                 patch.object(report, "_capture_peak", return_value=0),
                 self.assertRaisesRegex(report.AudioReportError, text),
             ):
@@ -199,7 +199,7 @@ class ReportCommandTests(unittest.TestCase):
             )
             with (
                 self.subTest(mode=mode),
-                patch.object(report.sys, "platform", platform),
+                patch.object(report, "sys", SimpleNamespace(platform=platform)),
                 patch.object(report, "_device_name", side_effect=lambda device: device),
                 patch.object(_lead_probe, "scan_immediate", return_value=immediate),
                 patch.object(_lead_probe, "scan_lead_times", return_value=tuning),
@@ -219,7 +219,7 @@ class ReportCommandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nested" / "report.json"
             with (
-                patch.object(report.sys, "platform", "darwin"),
+                patch.object(report, "sys", SimpleNamespace(platform="darwin")),
                 patch.object(report, "_run", return_value={"validated": True}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -253,26 +253,26 @@ class ReportCommandTests(unittest.TestCase):
         ):
             with (
                 self.subTest(args=args),
-                patch.object(report.sys, "platform", "darwin"),
+                patch.object(report, "sys", SimpleNamespace(platform="darwin")),
                 contextlib.redirect_stderr(io.StringIO()),
                 self.assertRaises(SystemExit) as error,
             ):
                 report.main(args)
             self.assertEqual(error.exception.code, 2)
         with (
-            patch.object(report.sys, "platform", "win32"),
+            patch.object(report, "sys", SimpleNamespace(platform="win32")),
             contextlib.redirect_stderr(io.StringIO()),
             self.assertRaises(SystemExit),
         ):
             report.main([])
         with (
-            patch.object(report.sys, "platform", "darwin"),
+            patch.object(report, "sys", SimpleNamespace(platform="darwin")),
             patch.object(report, "np", None),
             self.assertRaisesRegex(SystemExit, "needs numpy"),
         ):
             report.main([])
         with (
-            patch.object(report.sys, "platform", "darwin"),
+            patch.object(report, "sys", SimpleNamespace(platform="darwin")),
             patch.object(report, "_run", side_effect=report.AudioReportError("no device")),
             self.assertRaisesRegex(SystemExit, "no device"),
         ):

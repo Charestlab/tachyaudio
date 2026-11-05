@@ -61,7 +61,8 @@ class SilentProbeTests(unittest.TestCase):
         handle = stream()
         with (
             patch.object(ta, "ScheduledOutputStream", return_value=handle),
-            patch.object(lead.sys, "platform", "darwin"),
+            patch.object(lead, "sys", SimpleNamespace(platform="darwin")),
+            patch.object(lead.mp, "Event", return_value=Mock()),
             patch.object(lead.time, "monotonic", return_value=1),
             patch.object(lead.time, "sleep"),
         ):
@@ -73,7 +74,7 @@ class SilentProbeTests(unittest.TestCase):
         handle.schedule_asap.assert_called()
         self.assertEqual(handle.minimum_lead_time, 0.012)
         with (
-            patch.object(lead.sys, "platform", "linux"),
+            patch.object(lead, "sys", SimpleNamespace(platform="linux")),
             patch.object(lead.time, "monotonic", return_value=1),
         ):
             lead._submit_immediate(handle, b"silent")
@@ -113,7 +114,7 @@ class SilentProbeTests(unittest.TestCase):
 
     def test_fast_settings_search_skips_errors_and_failed_buffers(self):
         with (
-            patch.object(tuning.sys, "platform", "darwin"),
+            patch.object(tuning, "sys", SimpleNamespace(platform="darwin")),
             patch.object(
                 tuning,
                 "_probe",
@@ -124,7 +125,7 @@ class SilentProbeTests(unittest.TestCase):
         self.assertEqual(settings, tuning.FastSettings(0.001, 0.03))
         self.assertEqual(probe.call_args.args[4], 0)
         with (
-            patch.object(tuning.sys, "platform", "linux"),
+            patch.object(tuning, "sys", SimpleNamespace(platform="linux")),
             patch.object(tuning, "_probe", return_value=(False, 0.02)),
             self.assertRaisesRegex(RuntimeError, "no scheduled-output buffer"),
         ):

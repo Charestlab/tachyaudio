@@ -56,7 +56,7 @@ class SchedulerClockTests(unittest.TestCase):
 
 class SchedulerFailureTests(unittest.TestCase):
     def setUp(self):
-        self.platform = patch.object(scheduled.sys, "platform", "darwin")
+        self.platform = patch.object(scheduled, "sys", SimpleNamespace(platform="darwin"))
         self.platform.start()
         self.addCleanup(self.platform.stop)
         self.handle = Mock()
@@ -88,7 +88,10 @@ class SchedulerFailureTests(unittest.TestCase):
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 ta.ScheduledOutputStream(**options)
-        with patch.object(scheduled.sys, "platform", "win32"), self.assertRaises(ValueError):
+        with (
+            patch.object(scheduled, "sys", SimpleNamespace(platform="win32")),
+            self.assertRaises(ValueError),
+        ):
             ta.ScheduledOutputStream(latency=0.01)
 
     def test_deadlines_are_validated_and_native_copy_failures_normalized(self):
@@ -140,7 +143,7 @@ class SchedulerFailureTests(unittest.TestCase):
 
     def test_windows_scheduler_uses_qpc_and_translates_results(self):
         with (
-            patch.object(scheduled.sys, "platform", "win32"),
+            patch.object(scheduled, "sys", SimpleNamespace(platform="win32")),
             patch.object(scheduled, "_wasapi_clock_offset", return_value=(100, 200)),
         ):
             stream = ta.ScheduledOutputStream(channels=1)
@@ -165,7 +168,7 @@ class SchedulerFailureTests(unittest.TestCase):
 
     def test_windows_clock_correlation_failure_closes_allocated_stream(self):
         with (
-            patch.object(scheduled.sys, "platform", "win32"),
+            patch.object(scheduled, "sys", SimpleNamespace(platform="win32")),
             patch.object(scheduled, "_wasapi_clock_offset", side_effect=RuntimeError("clock")),
             self.assertRaisesRegex(RuntimeError, "clock"),
         ):
