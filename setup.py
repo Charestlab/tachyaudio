@@ -23,7 +23,11 @@ extensions = [
         Extension(
             "tachyaudio._native",
             sources=["src/tachyaudio/_native.c"],
-            depends=["src/tachyaudio/_scheduled_coreaudio.h", "src/tachyaudio/_scheduled_common.h"],
+            depends=[
+                "src/tachyaudio/_scheduled_coreaudio.h",
+                "src/tachyaudio/_scheduled_wasapi.h",
+                "src/tachyaudio/_scheduled_common.h",
+            ],
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
             libraries=libraries,

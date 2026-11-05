@@ -136,6 +136,17 @@ class ScheduledApiTests(unittest.TestCase):
         ta._native.ScheduledOutputStream.assert_called_with(48000, 2, None, 5000)
 
 
+@unittest.skipUnless(sys.platform == "win32", "Windows native extension")
+class WasapiBuildTests(unittest.TestCase):
+    def test_scheduler_available_without_an_audio_endpoint(self) -> None:
+        stream = ta.ScheduledOutputStream(channels=1)
+        try:
+            self.assertEqual(stream.status()["clock_source"], "wasapi-audioclock-qpc")
+            self.assertFalse(stream.failed)
+        finally:
+            stream.close()
+
+
 class LinuxDefaultsTests(unittest.TestCase):
     def test_missing_hw_device_lists_available_devices(self) -> None:
         with patch("tachyaudio._scheduled.sys.platform", "linux"), \

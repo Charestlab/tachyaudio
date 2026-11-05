@@ -1,8 +1,19 @@
 # Windows native scheduling development
 
-Tachyaudio's existing Windows backend uses WASAPI through miniaudio.
-This procedure verifies ordinary playback before developing the
-device-clock backend for `ScheduledOutputStream`.
+Windows supports device-clock playback through `ScheduledOutputStream` and
+TachyPy's explicit `Audio(timing_mode="native")`. The scheduler uses WASAPI
+shared-mode rendering and estimates sample presentation from the stream's
+playback position and its correlated QPC timestamp.
+
+- Use the Windows endpoint's current float32 shared mix sample rate. Pass mono
+  to duplicate it across the endpoint, or match the endpoint's channel count.
+- Pass `device_id=None` for the default output, or use an output ID from
+  `tachyaudio.list_devices()`. Leave `latency=None` to use the shared engine period.
+- For high-resolution `time.monotonic()` deadlines, use CPython with a
+  `QueryPerformanceCounter()` monotonic clock. Check
+  `time.get_clock_info("monotonic")`. On versions that use `GetTickCount64()`,
+  TachyAudio maps deadlines to QPC at startup, but the caller's deadlines
+  retain the system tick's coarse resolution.
 
 ## Build from source
 
@@ -40,10 +51,14 @@ reports captured frames.
 
 ## Scheduler validation
 
-The Windows scheduler should use the WASAPI device clock to place finite
-stimuli against Python monotonic deadlines. Exercise absolute onset, overlap
-mixing, cancellation, missed deadlines, and playback while Python holds the
-GIL. Compare predicted onset with a wired loopback measurement before making
-claims about physical timing. See [native scheduling](native-scheduling.md)
-for the existing API and [electrical loopback](electrical-loopback.md) for the
-measurement setup.
+The hardware tests also exercise scheduled playback, overlap, cancellation,
+explicit device selection, and playback while Python holds the GIL. Run the
+placement probe to record predicted residuals and missed trials under load.
+
+```powershell
+.\.venv\Scripts\python.exe examples/measure_scheduled_timing.py --trials 100 --output build/wasapi-timing.json
+```
+
+Use [electrical loopback](electrical-loopback.md) to compare predictions with
+physical onset. The probe's residual only measures sample selection on the
+estimated WASAPI timeline.

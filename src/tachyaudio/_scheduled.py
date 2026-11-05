@@ -13,6 +13,29 @@ from tachyaudio._errors import BackendUnavailable, StreamClosed, TachyAudioError
 from tachyaudio._stream import StreamConfig, _validate_frames, _validate_timeout
 
 _STREAM_FAULTS = frozenset({7, 8, 9, 10})
+_TIMESTAMP_FIELDS = (
+    "requested_ns", "predicted_onset_ns", "render_callback_ns",
+    "render_complete_ns", "predicted_end_ns",
+)
+
+
+def _wasapi_clock_offset() -> tuple[int, int]:
+    """Translate legacy Windows monotonic timestamps into the QPC timebase."""
+    info = time.get_clock_info("monotonic")
+    if info.implementation != "GetTickCount64()":
+        return 0, 0
+    # Estimate the correspondence at a tick transition. Deadlines sampled
+    # using this clock still carry up to one tick of caller-side quantization.
+    before = time.perf_counter_ns()
+    previous = time.monotonic_ns()
+    deadline = before + 50_000_000
+    while before < deadline:
+        current = time.monotonic_ns()
+        after = time.perf_counter_ns()
+        if current != previous:
+            return (before + after) // 2 - current, round(info.resolution * 1e9)
+        before = after
+    raise RuntimeError("could not correlate Windows monotonic time with the WASAPI clock")
 
 
 class SchedulingError(TachyAudioError):
@@ -52,7 +75,8 @@ class ScheduledOutputStream:
     macOS uses Core Audio output timestamps on the device's current
     configuration. Linux opens an explicit ALSA ``hw:`` device directly
     (bypassing PulseAudio/PipeWire) and places onsets with a device-clock model
-    fitted to ALSA status reports. Neither is an externally verified onset.
+    fitted to ALSA status reports. Windows uses shared-mode WASAPI playback
+    position and QPC timestamps. These are estimates of physical onset.
 
     Parameters
     ----------
@@ -65,6 +89,7 @@ class ScheduledOutputStream:
     device_id:
         macOS: device id or ``None`` for the default output. Linux: required
         ``hw:CARD,DEVICE`` (``aplay -l``), not in use by another program.
+        Windows: output id from ``list_devices()`` or ``None`` for the default.
     minimum_lead_time:
         Seconds of advance notice ``schedule()`` requires. ``None`` (default):
         derived from native output timestamps/delay after ``start()`` (see
@@ -76,6 +101,7 @@ class ScheduledOutputStream:
         the current HAL buffer; an explicit value changes the SHARED device
         buffer and restores it on close if it still matches this stream's
         setting. Avoid concurrent streams with different explicit settings.
+        Windows uses the shared audio engine's default period.
         Smaller buffers shorten output delay and ``lead_time``; they do not
         establish physical onset precision.
     """
@@ -105,7 +131,7 @@ class ScheduledOutputStream:
             )
         if latency is not None:
             if sys.platform not in ("darwin", "linux"):
-                raise ValueError("latency requires the Core Audio or ALSA scheduler")
+                raise ValueError("explicit latency requires the Core Audio or ALSA scheduler")
             lower = 0.000001 if sys.platform == "darwin" else 0.001
             if not math.isfinite(latency) or not lower <= latency <= 1.0:
                 raise ValueError(f"latency must be between {lower} and 1.0 seconds")
@@ -120,7 +146,7 @@ class ScheduledOutputStream:
             ) from error
         factory = getattr(_native, "ScheduledOutputStream", None)
         if factory is None:
-            raise BackendUnavailable("native scheduling is available only on macOS and Linux")
+            raise BackendUnavailable("native scheduling requires Core Audio, ALSA, or WASAPI")
         arguments: tuple[Any, ...] = (sample_rate, channels, device_id)
         if latency is not None:
             arguments += (round(latency * 1e6),)
@@ -138,6 +164,12 @@ class ScheduledOutputStream:
             ) from error
         self._closed = False
         self._latest: int | None = None
+        self._clock_offset_ns, self._clock_guard_ns = (
+            _wasapi_clock_offset() if sys.platform == "win32" else (0, 0)
+        )
+
+    def _scheduler_now_ns(self) -> int:
+        return time.perf_counter_ns() if sys.platform == "win32" else time.monotonic_ns()
 
     def __enter__(self) -> ScheduledOutputStream:
         try:
@@ -159,7 +191,7 @@ class ScheduledOutputStream:
         """Copy a whole float32 stimulus ahead of an absolute monotonic deadline.
 
         Returns the stimulus id for ``wait``/``cancel``. Up to 32 stimuli
-        can be queued ahead on macOS and Linux, back to back or overlapping:
+        can be queued ahead, back to back or overlapping:
         stimuli that overlap in time are summed and clamped to [-1, 1]. A
         stimulus due sooner than ``lead_time`` is rejected. Python does not
         need to run again at onset.
@@ -170,14 +202,18 @@ class ScheduledOutputStream:
         if not math.isfinite(when) or when <= 0:
             raise ValueError("when must be a finite positive monotonic time")
         target_ns = round(when * 1e9)
-        if not 0 < target_ns < 2**64:
+        native_target = target_ns + self._clock_offset_ns
+        if not (0 < target_ns < 2**64 and 0 < native_target < 2**64):
             raise ValueError("when exceeds the native clock range")
         lead_ns = round(self.lead_time * 1e9)
         if target_ns - time.monotonic_ns() < lead_ns:
             raise SchedulingError("insufficient advance notice for scheduled onset")
         view, _, _ = _validate_frames(frames, self.config.channels)
         try:
-            stimulus = self._handle.schedule(view, target_ns, lead_ns)
+            native_lead = lead_ns
+            if self.minimum_lead_time is None:
+                native_lead = max(0, lead_ns - self._clock_guard_ns)
+            stimulus = self._handle.schedule(view, native_target, native_lead)
         except ValueError as error:
             # Normalize deadlines missed during the native copy.
             if "insufficient advance notice" in str(error):
@@ -207,13 +243,15 @@ class ScheduledOutputStream:
         Equals ``minimum_lead_time`` when one was given. Otherwise uses the
         largest native output delay observed after start(), plus one device
         period and 2 ms. Core Audio supplies output host timestamps directly;
-        ALSA estimates them from its status/delay clock model.
+        ALSA estimates them from its status/delay clock model. WASAPI adds a
+        clock margin when Python's monotonic clock uses coarse system ticks.
         """
         if self.minimum_lead_time is not None:
             return self.minimum_lead_time
         status = self._handle.status()
         period = status["period_frames"] / self.config.sample_rate
-        return float(status["output_delay_max_us"] / 1e6 + period + 0.002)
+        return float(status["output_delay_max_us"] / 1e6 + period + 0.002
+                     + self._clock_guard_ns / 1e9)
 
     def status(self) -> dict[str, Any]:
         """Return experimental native status and diagnostic counters."""
@@ -238,8 +276,8 @@ class ScheduledOutputStream:
         deadline = None if timeout is None else time.monotonic() + timeout
         result = self.wait_rendered(timeout, stimulus)
         tail_ns = round(self.status().get("buffer_frames", 0) / self.config.sample_rate * 1e9)
-        finish_ns = result.predicted_end_ns + tail_ns
-        while time.monotonic_ns() < finish_ns:
+        finish_ns = result.predicted_end_ns + self._clock_offset_ns + tail_ns
+        while self._scheduler_now_ns() < finish_ns:
             if self._closed:
                 raise CancelledError("stream closed before estimated playback completion")
             if deadline is not None and time.monotonic() >= deadline:
@@ -267,12 +305,11 @@ class ScheduledOutputStream:
             status = self._record(stimulus)
             state = status["state"]
             if state == 4:
-                return ScheduledTiming(immediate=bool(status.get("immediate", False)),
-                                       **{name: status[name] for name in (
-                    "requested_ns", "predicted_onset_ns", "render_callback_ns",
-                    "render_complete_ns",
-                    "predicted_end_ns", "rendered_frames",
-                )})
+                return ScheduledTiming(
+                    immediate=bool(status.get("immediate", False)),
+                    rendered_frames=status["rendered_frames"],
+                    **{name: status[name] - self._clock_offset_ns for name in _TIMESTAMP_FIELDS},
+                )
             if state == 5:
                 raise CancelledError("scheduled stimulus cancelled")
             if state in failures:

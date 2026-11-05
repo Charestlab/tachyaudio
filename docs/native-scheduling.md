@@ -6,7 +6,8 @@ clocks. tachypy exposes this as `Audio(timing_mode="native")`.
 - **macOS:** Core Audio HAL `AudioDeviceIOProc`.
 - **Linux:** direct ALSA with an explicit `hw:` device; see
   [Linux setup and validation](linux-scheduling.md).
-- **Windows:** unavailable.
+- **Windows:** shared-mode WASAPI with an event-driven render thread and
+  `IAudioClock` position/QPC timestamps. See [Windows setup and validation](windows-scheduling.md).
 
 ## Usage
 
@@ -22,11 +23,12 @@ with ta.ScheduledOutputStream(sample_rate=48000, channels=1) as stream:
     timing = stream.wait(timeout=2, stimulus=stimulus)
 ```
 
-Construction opens the device; `start()` (or the context manager) starts it
-playing silence and waits for initial clock observations. `schedule()` copies the
-stimulus and needs `stream.lead_time` of advance notice — on both macOS and Linux
-the observed output delay plus one period and 2 ms, or `minimum_lead_time` if
-given. It returns an id, and up to 32 stimuli can be queued ahead, back to back,
+On Windows, `start()` opens the device. On macOS and Linux, construction opens
+it. `start()` (or the context manager) starts playback with silence and waits
+for initial clock observations. `schedule()` copies the stimulus and needs
+`stream.lead_time` of advance notice. The default is the observed output delay
+plus one period and 2 ms, with an additional margin on Windows when Python uses
+coarse system ticks. It returns an id, and up to 32 stimuli can be queued ahead, back to back,
 each waited on or cancelled individually (`wait(stimulus=id)`, `cancel(id)`).
 Stimuli that overlap in time are mixed: their samples are summed and clamped
 to [-1, 1].

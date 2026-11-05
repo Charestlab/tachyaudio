@@ -93,12 +93,15 @@ def main() -> None:
     if args.output.exists() or args.output.with_suffix(".md").exists():
         parser.error("Output exists; choose a new report path")
     source_root = Path(__file__).resolve().parents[1] / "src/tachyaudio"
-    source = source_root / (
-        "_scheduled_alsa.c" if sys.platform.startswith("linux") else "_scheduled_coreaudio.h"
-    )
+    source = source_root / {
+        "darwin": "_scheduled_coreaudio.h",
+        "linux": "_scheduled_alsa.c",
+        "win32": "_scheduled_wasapi.h",
+    }[sys.platform]
     report = {
         "platform": platform.platform(),
         "python": platform.python_version(),
+        "monotonic_clock": vars(time.get_clock_info("monotonic")),
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "common_sha256": hashlib.sha256(
             (source_root / "_scheduled_common.h").read_bytes()
@@ -142,7 +145,7 @@ def main() -> None:
         "python-held runs a Python busy loop with a 500 ms thread-switch interval across onset.",
     ])
     text = "\n".join(lines) + "\n"
-    args.output.with_suffix(".md").write_text(text)
+    args.output.with_suffix(".md").write_text(text, encoding="utf-8")
     print(text)
     if any(case["failed"] for case in report["cases"]):
         raise SystemExit(1)

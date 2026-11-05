@@ -7,7 +7,8 @@ Status: beta. Ordinary streams use Core Audio on macOS, vendored `miniaudio`
 on Linux (PulseAudio/PipeWire first, ALSA as fallback) and vendored `miniaudio`
 with WASAPI on Windows. Experimental device-clock scheduling
 (`ScheduledOutputStream`) is available on macOS (Core Audio) and Linux (direct
-ALSA); not yet on Windows. See [Linux: which audio path is used](#linux-which-audio-path-is-used).
+ALSA), and on [Windows (WASAPI shared mode)](docs/windows-scheduling.md).
+See [Linux: which audio path is used](#linux-which-audio-path-is-used).
 
 ## Goals
 
