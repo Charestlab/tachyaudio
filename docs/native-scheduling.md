@@ -33,6 +33,10 @@ each waited on or cancelled individually (`wait(stimulus=id)`, `cancel(id)`).
 Stimuli that overlap in time are mixed: their samples are summed and clamped
 to [-1, 1].
 
+On macOS, wireless devices have up to 10 seconds to provide timing callbacks;
+wired devices have up to 2 seconds. Startup returns as soon as the clock is ready.
+Core Audio notifications use a private queue without changing the process-wide run loop.
+
 `wait_rendered()` returns once every sample is in device buffers, possibly
 **before onset** for a short stimulus. `wait()` also waits through the predicted
 end plus one buffer, so closing afterwards cannot cut the sound. Neither is a
@@ -51,6 +55,38 @@ Waits default to the latest id. Read results
 promptly: inactive records are recycled oldest-first across 32 slots once no
 rendered samples remain in flight. Missed onsets drop only that sound;
 clock/format/device faults or late callbacks require reopening the stream.
+
+## Tips and tricks
+
+The order of operations that keeps native playback both precise and stable:
+
+1. **Warm the clock once, at setup.** `start()` (via the context manager or
+   `Audio.prepare()`) waits for the device's first timing callbacks and builds the
+   `monotonic → hardware` clock mapping that makes a `when=` onset meaningful. Do it
+   once during setup, off the timing-critical path — not inside your trial loop. On
+   macOS a Bluetooth/AirPlay output is given up to ~10 s to spin up; wired/built-in
+   outputs only ~2 s. A healthy device returns the instant its callbacks arrive.
+
+2. **Run interactive plotting on the GUI's main thread.** If you encounter a
+   GUI hang or crash, close the stream before showing the figure and reopen it
+   afterwards. Record the backend, audio device, and traceback or crash report.
+
+3. **Schedule with `when=`, computed ahead by at least `lead_time`.** `play(data)` with
+   no `when` is "play now" (next callback), convenient but not for a fixed onset.
+
+4. **Calibrate Bluetooth, or avoid it for measurements.** A Bluetooth output
+   (`status()["transport"] == "bluetooth"`) has high, variable latency the OS
+   under-reports, plus a few ms of irreducible jitter. For precise timing use a wired
+   or built-in output. To use Bluetooth anyway, **measure its latency once** (e.g.
+   `examples/measure_coreaudio_loopback.py`) and pass the under-reported residual as
+   `latency_bias=<seconds>`: this corrects the systematic offset so the *mean* onset is
+   right, but the jitter remains. A 2.4 GHz USB dongle (gaming headset) appears as a
+   `usb` transport with far lower, more stable latency — calibrating its bias gives
+   genuinely good timing. Re-check the bias after any reconnection.
+
+5. **For the shortest safe onset, measure the buffer once** with
+   `fastest_safe_settings()` (silent, ~1 s) and apply the returned `latency` /
+   `minimum_lead_time` (see below).
 
 ## macOS settings and implementation
 
