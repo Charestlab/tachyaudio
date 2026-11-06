@@ -1,5 +1,7 @@
 #include <stdatomic.h>
 #include <math.h>
+#include <dispatch/dispatch.h>
+#include <Block.h>
 
 #include "_scheduled_common.h"
 
@@ -27,7 +29,11 @@ typedef struct {
     int running, busy, closed, listener_installed;
     AudioStreamID *streams;
     UInt32 stream_count, stream_listeners;
+    dispatch_queue_t listener_queue;
+    AudioObjectPropertyListenerBlock listener_block;
     UInt64 next_id, latest_id, presentation_latency_ns;
+    int latency_bias_us;
+    UInt32 transport_type;
     TachyCoreStimulus stimuli[TACHY_CORE_QUEUE];
     atomic_int fault, device_changed, latency_changed;
     atomic_ullong callbacks, observations, delay_ns, max_delay_ns;
@@ -43,6 +49,10 @@ static int tachy_core_active(int state)
 static void tachy_core_init(TachyScheduledOutput *self)
 {
     mach_timebase_info(&self->timebase);
+    self->listener_queue = NULL;
+    self->listener_block = NULL;
+    self->latency_bias_us = 0;
+    self->transport_type = 0;
     atomic_init(&self->fault, 0);
     atomic_init(&self->device_changed, 0);
     atomic_init(&self->latency_changed, 0);
@@ -55,6 +65,62 @@ static void tachy_core_init(TachyScheduledOutput *self)
         atomic_init(&self->stimuli[i].cancel_requested, 0);
         atomic_init(&self->stimuli[i].rendered_frames, 0);
     }
+}
+
+static void tachy_core_isolate_hal_run_loop(void)
+{
+    /* Keep HAL property notifications off the process main run loop so an open
+       device cannot perturb a GUI event loop (e.g. matplotlib). Done once, and
+       only when the HAL would otherwise use the main loop, so a host that chose
+       its own run loop is left untouched. */
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    AudioObjectPropertyAddress address = {kAudioHardwarePropertyRunLoop,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+    CFRunLoopRef current = NULL;
+    UInt32 size = sizeof(current);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL,
+                                   &size, &current) != noErr)
+        return;
+    if (current == CFRunLoopGetMain()) {
+        CFRunLoopRef none = NULL;
+        AudioObjectSetPropertyData(kAudioObjectSystemObject, &address, 0, NULL,
+                                   sizeof(none), &none);
+    }
+}
+
+static int tachy_core_is_wireless(UInt32 transport)
+{
+    return transport == kAudioDeviceTransportTypeBluetooth ||
+           transport == kAudioDeviceTransportTypeBluetoothLE ||
+           transport == kAudioDeviceTransportTypeAirPlay;
+}
+
+static const char *tachy_core_transport_name(UInt32 transport)
+{
+    switch (transport) {
+        case kAudioDeviceTransportTypeBuiltIn: return "builtin";
+        case kAudioDeviceTransportTypeBluetooth:
+        case kAudioDeviceTransportTypeBluetoothLE: return "bluetooth";
+        case kAudioDeviceTransportTypeAirPlay: return "airplay";
+        case kAudioDeviceTransportTypeUSB: return "usb";
+        case kAudioDeviceTransportTypeHDMI: return "hdmi";
+        case kAudioDeviceTransportTypeDisplayPort: return "displayport";
+        case kAudioDeviceTransportTypeAggregate: return "aggregate";
+        case kAudioDeviceTransportTypeVirtual: return "virtual";
+        default: return "other";
+    }
+}
+
+static UInt64 tachy_core_clock_timeout_ns(TachyScheduledOutput *self)
+{
+    /* How long start() waits for the device clock before giving up. Wired and
+       built-in outputs that cannot produce a clock are reported quickly; wireless
+       routes (Bluetooth, AirPlay) spin up slowly, so wait much longer. Either way
+       start() returns as soon as the first callbacks arrive, so a healthy device
+       never pays this cost. */
+    return tachy_core_is_wireless(self->transport_type) ? 10000000000ULL : 2000000000ULL;
 }
 
 static OSStatus tachy_scheduled_device_changed(AudioObjectID device, UInt32 count,
@@ -84,17 +150,22 @@ static const AudioObjectPropertySelector tachy_core_properties[] = {
 
 static void tachy_scheduled_remove_listener(TachyScheduledOutput *self)
 {
+    if (!self->listener_block) {
+        self->listener_installed = 0;
+        self->stream_listeners = 0;
+        return;
+    }
     for (int i = 0; i < self->listener_installed; i++) {
         AudioObjectPropertyAddress address = {tachy_core_properties[i],
             (i == 3 ? kAudioDevicePropertyScopeOutput : kAudioObjectPropertyScopeGlobal), kAudioObjectPropertyElementMain};
-        AudioObjectRemovePropertyListener(self->device, &address, tachy_scheduled_device_changed, self);
+        AudioObjectRemovePropertyListenerBlock(self->device, &address, self->listener_queue, self->listener_block);
     }
     self->listener_installed = 0;
     AudioObjectPropertyAddress address = {kAudioStreamPropertyVirtualFormat,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
     for (UInt32 i = 0; i < self->stream_listeners; i++) {
         address.mSelector = i % 2 ? kAudioStreamPropertyLatency : kAudioStreamPropertyVirtualFormat;
-        AudioObjectRemovePropertyListener(self->streams[i / 2], &address, tachy_scheduled_device_changed, self);
+        AudioObjectRemovePropertyListenerBlock(self->streams[i / 2], &address, self->listener_queue, self->listener_block);
     }
     self->stream_listeners = 0;
 }
@@ -359,6 +430,19 @@ static void tachy_scheduled_dealloc(TachyScheduledOutput *self)
         }
         AudioDeviceDestroyIOProcID(self->device, self->proc);
     }
+    /* Flush any listener block still queued before the struct it captures is
+       freed, then release the queue and block. */
+    if (self->listener_queue) {
+        dispatch_sync(self->listener_queue, ^{});
+    }
+    if (self->listener_block) {
+        Block_release(self->listener_block);
+        self->listener_block = NULL;
+    }
+    if (self->listener_queue) {
+        dispatch_release(self->listener_queue);
+        self->listener_queue = NULL;
+    }
     tachy_core_restore_buffer(self);
     PyMem_RawFree(self->streams);
     for (int i = 0; i < TACHY_CORE_QUEUE; i++) PyMem_RawFree(self->stimuli[i].samples);
@@ -367,13 +451,16 @@ static void tachy_scheduled_dealloc(TachyScheduledOutput *self)
 
 static PyObject *tachy_scheduled_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
-    static char *keywords[] = {"sample_rate", "channels", "device_id", "buffer_us", NULL};
+    static char *keywords[] = {"sample_rate", "channels", "device_id", "buffer_us",
+                               "latency_bias_us", NULL};
     int sample_rate = 48000;
     int channels = 2;
     const char *device_id = NULL;
     unsigned int buffer_us = 0;
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|iizI", keywords,
-                                    &sample_rate, &channels, &device_id, &buffer_us)) {
+    int latency_bias_us = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|iizIi", keywords,
+                                    &sample_rate, &channels, &device_id, &buffer_us,
+                                    &latency_bias_us)) {
         return NULL;
     }
     if (sample_rate < 1 || channels < 1) {
@@ -392,8 +479,18 @@ static PyObject *tachy_scheduled_new(PyTypeObject *type, PyObject *args, PyObjec
     }
     self->sample_rate = sample_rate;
     self->channels = channels;
+    self->latency_bias_us = latency_bias_us;
     self->device = device_id == NULL ? tachy_get_default_device(kAudioHardwarePropertyDefaultOutputDevice) :
         tachy_find_device_by_uid(device_id);
+    tachy_core_isolate_hal_run_loop();
+    {
+        AudioObjectPropertyAddress transport_address = {kAudioDevicePropertyTransportType,
+            kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain};
+        UInt32 transport_size = sizeof(self->transport_type);
+        if (AudioObjectGetPropertyData(self->device, &transport_address, 0, NULL,
+                                       &transport_size, &self->transport_type) != noErr)
+            self->transport_type = 0;
+    }
     AudioObjectPropertyAddress address = {
         kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput, kAudioObjectPropertyElementMain
     };
@@ -477,16 +574,27 @@ static PyObject *tachy_scheduled_new(PyTypeObject *type, PyObject *args, PyObjec
     if (result == noErr && !self->buffer_frames) result = kAudio_ParamError;
     if (result == noErr)
         result = AudioDeviceCreateIOProcID(self->device, tachy_scheduled_render, self, &self->proc);
+    /* Deliver HAL notifications on our own serial queue, never the caller's run
+       loop: an open stream must not perturb a GUI main loop (e.g. matplotlib). */
+    if (result == noErr) {
+        self->listener_queue = dispatch_queue_create("com.tachyaudio.coreaudio.listeners",
+                                                     DISPATCH_QUEUE_SERIAL);
+        self->listener_block = Block_copy(^(UInt32 count,
+                                            const AudioObjectPropertyAddress addresses[]) {
+            tachy_scheduled_device_changed(0, count, addresses, self);
+        });
+        if (!self->listener_queue || !self->listener_block) result = kAudio_ParamError;
+    }
     for (int i = 0; result == noErr && i < 4; i++) {
         address.mSelector = tachy_core_properties[i];
         address.mScope = i == 3 ? kAudioDevicePropertyScopeOutput : kAudioObjectPropertyScopeGlobal;
-        result = AudioObjectAddPropertyListener(self->device, &address, tachy_scheduled_device_changed, self);
+        result = AudioObjectAddPropertyListenerBlock(self->device, &address, self->listener_queue, self->listener_block);
         if (result == noErr) self->listener_installed++;
     }
     address.mScope = kAudioObjectPropertyScopeGlobal;
     for (UInt32 i = 0; result == noErr && i < self->stream_count * 2; i++) {
         address.mSelector = i % 2 ? kAudioStreamPropertyLatency : kAudioStreamPropertyVirtualFormat;
-        result = AudioObjectAddPropertyListener(self->streams[i / 2], &address, tachy_scheduled_device_changed, self);
+        result = AudioObjectAddPropertyListenerBlock(self->streams[i / 2], &address, self->listener_queue, self->listener_block);
         if (result == noErr) self->stream_listeners++;
     }
     if (result != noErr) {
@@ -513,8 +621,11 @@ static PyObject *tachy_scheduled_new(PyTypeObject *type, PyObject *args, PyObjec
         PyErr_SetString(PyExc_ValueError, "native scheduling requires readable, equal output stream latencies");
         Py_DECREF(self); return NULL;
     }
-    self->presentation_latency_ns = (UInt64)llround(
-        ((double)device_latency + stream_latency) * 1e9 / sample_rate);
+    /* Calibration: a user bias (e.g. for Bluetooth, whose true latency the HAL
+       under-reports) shifts the compensated acoustic onset. Clamp at zero. */
+    double presentation = ((double)device_latency + stream_latency) * 1e9 / sample_rate
+                          + (double)self->latency_bias_us * 1000.0;
+    self->presentation_latency_ns = presentation > 0.0 ? (UInt64)llround(presentation) : 0;
     return (PyObject *)self;
 }
 
@@ -542,7 +653,7 @@ static PyObject *tachy_scheduled_start(TachyScheduledOutput *self, PyObject *Py_
         Py_BEGIN_ALLOW_THREADS
         result = AudioDeviceStart(self->device, self->proc);
         if (result == noErr) {
-            UInt64 deadline = tachy_scheduled_ns(self, mach_absolute_time()) + 2000000000ULL;
+            UInt64 deadline = tachy_scheduled_ns(self, mach_absolute_time()) + tachy_core_clock_timeout_ns(self);
             while (atomic_load_explicit(&self->observations, memory_order_acquire) < 3 &&
                    !atomic_load_explicit(&self->fault, memory_order_acquire) &&
                    tachy_scheduled_ns(self, mach_absolute_time()) < deadline)
@@ -684,17 +795,19 @@ static PyObject *tachy_scheduled_status(TachyScheduledOutput *self, PyObject *Py
     unsigned int queued = 0;
     for (int i = 0; i < TACHY_CORE_QUEUE; i++)
         queued += tachy_core_active(atomic_load_explicit(&self->stimuli[i].state, memory_order_acquire));
-    PyObject *extra = Py_BuildValue("{s:K,s:I,s:I,s:d,s:s,s:s,s:s,s:I,s:I,s:K,s:d,s:d,s:d,s:d,s:I,s:I,s:O}",
+    PyObject *extra = Py_BuildValue("{s:K,s:I,s:I,s:d,s:s,s:s,s:s,s:s,s:I,s:I,s:K,s:d,s:d,s:d,s:d,s:i,s:I,s:I,s:O}",
         "callbacks", atomic_load_explicit(&self->callbacks, memory_order_relaxed),
         "buffer_frames", self->buffer_frames, "period_frames", self->buffer_frames,
         "sample_rate", self->sample_rate, "clock_source", "coreaudio-output-host-time",
         "device_format", "float32", "rt_method", "coreaudio-io-thread",
+        "transport", tachy_core_transport_name(self->transport_type),
         "device_channels", self->device_channels, "queued", queued,
         "clock_observations", atomic_load_explicit(&self->observations, memory_order_acquire),
         "output_delay_us", atomic_load_explicit(&self->delay_ns, memory_order_relaxed) / 1000.0,
         "output_delay_max_us", atomic_load_explicit(&self->max_delay_ns, memory_order_relaxed) / 1000.0,
         "presentation_latency_us", self->presentation_latency_ns / 1000.0,
         "latency_changed", (double)atomic_load_explicit(&self->latency_changed, memory_order_acquire),
+        "latency_bias_us", self->latency_bias_us,
         "minimum_buffer_frames", self->minimum_buffer_frames,
         "maximum_buffer_frames", self->maximum_buffer_frames,
         "buffer_automatic", self->buffer_changed ? Py_False : Py_True);

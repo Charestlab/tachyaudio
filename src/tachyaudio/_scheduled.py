@@ -88,8 +88,14 @@ class ScheduledOutputStream:
         device_id: str | None = None,
         minimum_lead_time: float | None = None,
         latency: float | None = None,
+        latency_bias: float | None = None,
     ) -> None:
         self.config = StreamConfig(sample_rate=sample_rate, channels=channels, device_id=device_id)
+        if latency_bias is not None:
+            if sys.platform != "darwin":
+                raise ValueError("latency_bias is currently only supported on macOS (Core Audio)")
+            if not math.isfinite(latency_bias):
+                raise ValueError("latency_bias must be finite")
         if minimum_lead_time is not None:
             if not math.isfinite(minimum_lead_time) or minimum_lead_time < 0:
                 raise ValueError("minimum_lead_time must be finite and nonnegative")
@@ -124,8 +130,11 @@ class ScheduledOutputStream:
         arguments: tuple[Any, ...] = (sample_rate, channels, device_id)
         if latency is not None:
             arguments += (round(latency * 1e6),)
+        keyword_arguments: dict[str, Any] = {}
+        if latency_bias is not None:
+            keyword_arguments["latency_bias_us"] = round(latency_bias * 1e6)
         try:
-            self._handle = factory(*arguments)
+            self._handle = factory(*arguments, **keyword_arguments)
         except RuntimeError as error:
             if not sys.platform.startswith("linux"):
                 raise

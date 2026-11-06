@@ -23,7 +23,21 @@ with ta.ScheduledOutputStream(sample_rate=48000, channels=1) as stream:
 ```
 
 Construction opens the device; `start()` (or the context manager) starts it
-playing silence and waits for initial clock observations. `schedule()` copies the
+playing silence and **waits briefly for the first device-clock observations**.
+Those observations build the mapping from the caller's monotonic clock to the
+hardware clock, which is what makes a `when=` onset meaningful — the wait is the
+synchronization, not avoidable latency. The timeout adapts to the device's
+transport type: wireless routes (Bluetooth/AirPlay) are given ~10 s to spin up,
+wired/built-in only ~2 s, and start returns the instant the first callbacks arrive.
+If the device still produces no clock, `start()` raises `Core Audio clock did not
+become ready; close and reopen`: retry once, or select a wired/built-in output
+(`device_id="BuiltInSpeakerDevice"`). HAL notifications are delivered on a private
+dispatch queue and, on first open, moved off the process main run loop, so an open
+stream does not disturb the caller's run loop; even so, do not keep a stream open
+across a blocking GUI event loop (e.g. matplotlib's `plt.show()`) — close it first
+and reopen afterwards.
+
+`schedule()` copies the
 stimulus and needs `stream.lead_time` of advance notice — on both macOS and Linux
 the observed output delay plus one period and 2 ms, or `minimum_lead_time` if
 given. It returns an id, and up to 32 stimuli can be queued ahead, back to back,
@@ -49,6 +63,42 @@ Waits default to the latest id. Read results
 promptly: inactive records are recycled oldest-first across 32 slots once no
 rendered samples remain in flight. Missed onsets drop only that sound;
 clock/format/device faults or late callbacks require reopening the stream.
+
+## Tips and tricks
+
+The order of operations that keeps native playback both precise and stable:
+
+1. **Warm the clock once, at setup.** `start()` (via the context manager or
+   `Audio.prepare()`) waits for the device's first timing callbacks and builds the
+   `monotonic → hardware` clock mapping that makes a `when=` onset meaningful. Do it
+   once during setup, off the timing-critical path — not inside your trial loop. On
+   macOS a Bluetooth/AirPlay output is given up to ~10 s to spin up; wired/built-in
+   outputs only ~2 s. A healthy device returns the instant its callbacks arrive.
+
+2. **Keep audio and a GUI event loop apart.** Do **not** hold an open stream across a
+   blocking GUI call such as matplotlib's `plt.show()` — an open Core Audio device and
+   the macOS run loop contend and can crash the process (tachyaudio moves HAL
+   notifications off the main run loop to reduce this, but the safe rule stands).
+   Close the stream before showing a figure and reopen afterwards; a `plt.show()`
+   must never sit between opening a stream and closing it. Running under a debugger
+   (VS Code / debugpy) makes this worse — prefer running the script directly.
+
+3. **Schedule with `when=`, computed ahead by at least `lead_time`.** `play(data)` with
+   no `when` is "play now" (next callback), convenient but not for a fixed onset.
+
+4. **Calibrate Bluetooth, or avoid it for measurements.** A Bluetooth output
+   (`status()["transport"] == "bluetooth"`) has high, variable latency the OS
+   under-reports, plus a few ms of irreducible jitter. For precise timing use a wired
+   or built-in output. To use Bluetooth anyway, **measure its latency once** (e.g.
+   `examples/measure_coreaudio_loopback.py`) and pass the under-reported residual as
+   `latency_bias=<seconds>`: this corrects the systematic offset so the *mean* onset is
+   right, but the jitter remains. A 2.4 GHz USB dongle (gaming headset) appears as a
+   `usb` transport with far lower, more stable latency — calibrating its bias gives
+   genuinely good timing. Re-check the bias after any reconnection.
+
+5. **For the shortest safe onset, measure the buffer once** with
+   `fastest_safe_settings()` (silent, ~1 s) and apply the returned `latency` /
+   `minimum_lead_time` (see below).
 
 ## macOS settings and implementation
 
