@@ -7,7 +7,13 @@ From 1.0, the documented public API follows semantic versioning. Historical
 
 ## [Unreleased]
 
-## [1.0.0] - Unreleased
+## [1.1.0]
+
+- Add optional macOS latency calibration for scheduled playback.
+- Give wireless Core Audio routes more time to report a usable clock and
+  disarm property listeners before releasing stream resources.
+
+## [1.0.0]
 
 ### Changed
 
