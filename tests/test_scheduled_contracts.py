@@ -174,3 +174,30 @@ class SchedulerFailureTests(unittest.TestCase):
         ):
             ta.ScheduledOutputStream(channels=1)
         self.handle.close.assert_called_once()
+
+
+class LatencyBiasTests(unittest.TestCase):
+    def test_macos_converts_seconds_to_signed_native_microseconds(self):
+        for bias, microseconds in ((0.025, 25_000), (-0.0125, -12_500)):
+            with (
+                self.subTest(bias=bias),
+                patch.object(scheduled, "sys", SimpleNamespace(platform="darwin")),
+                patch.object(ta._native, "ScheduledOutputStream", create=True) as factory,
+            ):
+                stream = ta.ScheduledOutputStream(channels=1, latency_bias=bias)
+                try:
+                    factory.assert_called_once_with(48000, 1, None, latency_bias_us=microseconds)
+                finally:
+                    stream.close()
+
+    def test_invalid_bias_is_rejected_before_opening(self):
+        for platform, bias in (
+            ("win32", 0.01), ("linux", 0.01), ("darwin", float("nan")),
+            ("darwin", float("inf")), ("darwin", 1e100),
+        ):
+            with (
+                self.subTest(platform=platform, bias=bias),
+                patch.object(scheduled, "sys", SimpleNamespace(platform=platform)),
+                self.assertRaisesRegex(ValueError, "latency_bias"),
+            ):
+                ta.ScheduledOutputStream(latency_bias=bias)

@@ -120,8 +120,8 @@ class ScheduledOutputStream:
         if latency_bias is not None:
             if sys.platform != "darwin":
                 raise ValueError("latency_bias is currently only supported on macOS (Core Audio)")
-            if not math.isfinite(latency_bias):
-                raise ValueError("latency_bias must be finite")
+            if not math.isfinite(latency_bias) or not -2147 <= latency_bias <= 2147:
+                raise ValueError("latency_bias must be finite and within the native range")
         if minimum_lead_time is not None:
             if not math.isfinite(minimum_lead_time) or minimum_lead_time < 0:
                 raise ValueError("minimum_lead_time must be finite and nonnegative")

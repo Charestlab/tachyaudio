@@ -31,6 +31,7 @@ typedef struct {
     UInt32 stream_count, stream_listeners;
     dispatch_queue_t listener_queue;
     AudioObjectPropertyListenerBlock listener_block;
+    dispatch_block_t listener_disarm;
     UInt64 next_id, latest_id, presentation_latency_ns;
     int latency_bias_us;
     UInt32 transport_type;
@@ -51,6 +52,7 @@ static void tachy_core_init(TachyScheduledOutput *self)
     mach_timebase_info(&self->timebase);
     self->listener_queue = NULL;
     self->listener_block = NULL;
+    self->listener_disarm = NULL;
     self->latency_bias_us = 0;
     self->transport_type = 0;
     atomic_init(&self->fault, 0);
@@ -131,6 +133,11 @@ static void tachy_scheduled_remove_listener(TachyScheduledOutput *self)
         self->listener_installed = 0;
         self->stream_listeners = 0;
         return;
+    }
+    if (self->listener_queue && self->listener_disarm) {
+        /* Serialize with pending notifications; late notifications become no-ops
+           even if the device disappears and unregistering fails. */
+        dispatch_sync(self->listener_queue, self->listener_disarm);
     }
     for (int i = 0; i < self->listener_installed; i++) {
         AudioObjectPropertyAddress address = {tachy_core_properties[i],
@@ -407,10 +414,9 @@ static void tachy_scheduled_dealloc(TachyScheduledOutput *self)
         }
         AudioDeviceDestroyIOProcID(self->device, self->proc);
     }
-    /* Flush any listener block still queued before the struct it captures is
-       freed, then release the queue and block. */
-    if (self->listener_queue) {
-        dispatch_sync(self->listener_queue, ^{});
+    if (self->listener_disarm) {
+        Block_release(self->listener_disarm);
+        self->listener_disarm = NULL;
     }
     if (self->listener_block) {
         Block_release(self->listener_block);
@@ -555,11 +561,14 @@ static PyObject *tachy_scheduled_new(PyTypeObject *type, PyObject *args, PyObjec
     if (result == noErr) {
         self->listener_queue = dispatch_queue_create("com.tachyaudio.coreaudio.listeners",
                                                      DISPATCH_QUEUE_SERIAL);
+        __block TachyScheduledOutput *listener_target = self;
+        self->listener_disarm = Block_copy(^{ listener_target = NULL; });
         self->listener_block = Block_copy(^(UInt32 count,
                                             const AudioObjectPropertyAddress addresses[]) {
-            tachy_scheduled_device_changed(0, count, addresses, self);
+            if (listener_target) tachy_scheduled_device_changed(0, count, addresses, listener_target);
         });
-        if (!self->listener_queue || !self->listener_block) result = kAudio_ParamError;
+        if (!self->listener_queue || !self->listener_block || !self->listener_disarm)
+            result = kAudio_ParamError;
     }
     for (int i = 0; result == noErr && i < 4; i++) {
         address.mSelector = tachy_core_properties[i];
